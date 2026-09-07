@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Overclock</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">&#9211;</span>
+        <span class="brand-name">OVERCLOCK</span>
+        <span class="brand-sub">peer-to-peer resource sharing</span>
+      </div>
+      <div class="run-status" id="run-status">
+        <span class="run-status-dot" id="run-status-dot"></span>
+        <span id="run-status-text">Idle</span>
+      </div>
+    </header>
+
+    <section class="control-panel">
+      <div class="control-row">
+        <div class="field">
+          <label for="num-images">Batch size</label>
+          <input type="number" id="num-images" value="24" min="1" max="200">
+        </div>
+
+        <div class="field helpers-field">
+          <label>Helper devices</label>
+          <div id="helper-list" class="helper-list">
+            <div class="helper-row">
+              <input type="text" class="helper-input" placeholder="e.g. 192.168.1.42:5001">
+              <button class="btn-icon remove-helper" title="Remove this helper" type="button">&times;</button>
+            </div>
+          </div>
+          <button id="add-helper" class="btn-ghost" type="button">+ Add helper</button>
+        </div>
+
+        <button id="start-btn" class="btn-primary" type="button">Start</button>
+      </div>
+      <p class="hint" id="hint-text">
+        Enter each helper's address as <code>host:port</code>. Leave the list empty to run fully local.
+      </p>
+
+      <div class="iface-panel">
+        <div class="iface-panel-header">
+          <span>This device is reachable at</span>
+          <button id="refresh-ifaces" class="btn-icon" title="Refresh" type="button">&#8635;</button>
+        </div>
+        <div id="iface-list" class="iface-list"></div>
+      </div>
+    </section>
+
+    <section class="summary-strip" id="summary-strip" hidden>
+      <div class="summary-item">
+        <span class="summary-label">Job</span>
+        <span class="summary-value" id="summary-job">&mdash;</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">Elapsed</span>
+        <span class="summary-value" id="summary-elapsed">0.0s</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">Images</span>
+        <span class="summary-value" id="summary-images">0</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">Result</span>
+        <span class="summary-value" id="summary-result">&mdash;</span>
+      </div>
+    </section>
+
+    <main class="main-grid">
+      <section class="devices" id="devices"></section>
+      <section class="log-panel">
+        <div class="log-header">
+          <span>Activity Log</span>
+        </div>
+        <div class="log-body" id="log-body"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
