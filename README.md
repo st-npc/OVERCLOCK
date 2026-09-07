@@ -71,6 +71,43 @@ The main dashboard also has a **"Who's doing the work"** panel: a live bar
 showing exactly what fraction of the current batch went to the local
 device versus each helper, filling in per-device as chunks complete.
 
+### First-run intro: "break the screen"
+
+The first time you open the dashboard, a full-screen three.js scene covers
+it: a bright, RGB-lit stylized PC rendered from primitives (no external 3D
+model files) — a hue-cycling glow chases around the monitor's rim and the
+tower's LED strip against a vivid purple-to-teal backdrop. The monitor
+plays a short looping coding video. Tap/click the screen a handful of
+times and it cracks a little more each time (right on top of the playing
+video), then shatters — the fragments fly apart with basic gravity,
+freeze-framed mid-video — revealing the real dashboard underneath. There's
+a low-key **Skip** link if you'd rather not. It only plays once per
+browser (a `localStorage` flag remembers you've seen it); clear that key
+or open a private window to replay it. It's fully self-contained, gated
+behind `prefers-reduced-motion` (skips straight to the dashboard if that's
+set), and tears down its own render loop, pauses/unloads the video, and
+frees its GPU resources the moment it's dismissed — it doesn't linger and
+burn CPU/GPU after you're past it, which would be a bad look for a tool
+whose whole point is honest resource accounting. Source: `static/intro.js`.
+
+The coding video (`static/media/coding.mp4`, ~5.3MB) is CC0 stock footage
+from Pexels ("Typing of codes", via Coverr) — free to use, no attribution
+required — downloaded once and vendored locally rather than streamed from
+anywhere at runtime, same offline-safety reasoning as three.js below.
+
+The dashboard itself also has two more subtle three.js touches:
+- A faint, slow-drifting node field in the background (`static/bg.js`) —
+  low particle count, low opacity, pauses itself when the tab isn't
+  visible and skips entirely under `prefers-reduced-motion`.
+- A bold **"Spare capacity available right now"** headline number at the
+  top, averaged live across every reachable device and animated (eased
+  count-up) whenever it changes — a single at-a-glance number for "how
+  much idle power is on this network right now."
+
+All of this runs off three.js **vendored locally** in `static/vendor/`
+(not pulled from a CDN at runtime), so the offline-on-a-bare-LAN demo
+guarantee from the rest of this README still holds.
+
 ### Demoing the adaptive offload: "Simulate local overload"
 
 The amber panel at the top of the dashboard (`stress.py`) generates real
@@ -137,7 +174,10 @@ every image accounted for.
 | `relay_client.py` / `relay_server.py` | Cross-network relay tunnel — see below. `relay_server.py` is standalone and self-hostable. |
 | `app_helper.py` | Helper Flask service: `GET /stats`, `POST /process`, optional relay-polling thread. |
 | `app_main.py` | Orchestrator Flask service: dashboard, `POST /api/start`, `GET /api/events` (SSE), `GET /api/status`, `GET /api/interfaces`. |
-| `templates/`, `static/` | Dashboard UI. Hand-rolled canvas sparklines, no CDN dependency — works fully offline on a bare LAN. |
+| `templates/`, `static/` | Dashboard UI. Hand-rolled canvas sparklines; three.js is vendored locally in `static/vendor/` (not a CDN) — works fully offline on a bare LAN. |
+| `static/intro.js` | One-time "break the screen" three.js intro gate — see below. Not on the sharing/job code path. |
+| `static/media/` | Vendored CC0 stock video used by the intro (see below). |
+| `static/bg.js` | Ambient background node-field animation (three.js). Purely decorative. |
 
 ## Pluggable tasks (not limited to images)
 
@@ -334,6 +374,38 @@ time saved. The "Who's doing the work" panel's legend gets a per-device
 throughput figure (img/s) once each device finishes. If a run ends up
 fully local (no helpers, or all unreachable), the estimate naturally
 converges to the actual time and shows "no faster."
+
+## Seeing the load actually move during a real run
+
+By default the dashboard's device stats only refresh once a second, and
+the demo "image" task processes a 24-item batch in well under a second —
+too fast to visibly register on a 1s-cadence graph before it's over. Two
+things fix this so a real job's effect on your CPU/RAM is actually
+visible, not just a claim in the log:
+
+- **Fast polling during a job.** The moment a job starts, both the
+  internal device monitor and the dashboard's live event stream switch
+  from a 1s to a 0.2s refresh cadence (reverting the instant the job
+  ends), so a short burst of local or helper load gets sampled instead of
+  falling between two 1-second-apart snapshots.
+- **Explicit before/peak numbers, not just a sparkline to eyeball.** Every
+  device that does work in a run is tracked from the moment it's assigned
+  work: its real CPU%/RAM% right before, and the real peak measured while
+  it was processing. Once the run finishes, the "Who's doing the work"
+  panel shows this under each device's item count and throughput, e.g.
+  `CPU 12%→64% · RAM 41%→45%` — a concrete, measured before/after for
+  local *and* every helper, not an estimate.
+
+For the effect to be visually obvious on the sparklines too (not just the
+before/peak numbers), give the job enough real work to take at least a
+second or two: bump **Batch size** well above the default 24 (100-200 is
+plenty), or switch **Task** to the fractal renderer, which is deliberately
+heavier per item (~2s for 24 tiles) than the synthetic image filter. For a
+dramatic, on-demand demonstration of the same reactive split — without
+waiting on a real batch — use **Simulate local overload** above the
+controls: it loads this device with genuine CPU/RAM work you can watch
+build up, then when you start a job while it's active you can see the
+split shift hard toward the helper, and recover the instant you stop it.
 
 ## Cross-network relay (Priority 3 — needs infrastructure you host)
 

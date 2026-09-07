@@ -155,6 +155,12 @@ def api_start():
     return jsonify({"ok": True, "helpers": helpers, "num_images": num_images, "task_type": task_type})
 
 
+STATS_PUSH_INTERVAL_IDLE = 1.0
+STATS_PUSH_INTERVAL_ACTIVE = 0.2  # while a job is running, so the dashboard
+                                   # actually shows the CPU/RAM move in real
+                                   # time instead of only once a second
+
+
 @app.get("/api/events")
 def api_events():
     def format_sse(event: dict) -> str:
@@ -164,17 +170,18 @@ def api_events():
         client_queue = events.subscribe()
         try:
             # Send an immediate snapshot so a newly-opened tab isn't blank
-            # until the next 1s tick.
+            # until the next tick.
             yield format_sse({"type": "stats", "devices": monitor.snapshot_all(), "ts": time.time()})
             last_stats = time.time()
             while True:
+                push_interval = STATS_PUSH_INTERVAL_ACTIVE if orchestrator.is_running() else STATS_PUSH_INTERVAL_IDLE
                 try:
-                    event = client_queue.get(timeout=1.0)
+                    event = client_queue.get(timeout=push_interval)
                     yield format_sse(event)
                 except queue.Empty:
                     pass
                 now = time.time()
-                if now - last_stats >= 1.0:
+                if now - last_stats >= push_interval:
                     yield format_sse({"type": "stats", "devices": monitor.snapshot_all(), "ts": now})
                     last_stats = now
         except GeneratorExit:

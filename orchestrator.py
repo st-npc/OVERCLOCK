@@ -56,6 +56,7 @@ class Orchestrator:
     def _run_job_safely(self, helper_addresses, num_images, task_type):
         job_id = uuid.uuid4().hex[:8]
         self.current_job_id = job_id
+        self.monitor.begin_job()  # fast polling for the whole job, not just dispatch
         try:
             self._run_job(job_id, helper_addresses, num_images, task_type)
         except Exception as exc:  # a bug here must never leave the UI stuck
@@ -65,6 +66,7 @@ class Orchestrator:
             with self._job_lock:
                 self._job_running = False
             self.monitor.local.set_manual_busy(False)
+            self.monitor.end_job()
 
     # -- core job logic --------------------------------------------------
     def _run_job(self, job_id: str, helper_addresses: list, num_images: int, task_type: str = DEFAULT_TASK):
@@ -101,6 +103,16 @@ class Orchestrator:
         share_desc = ", ".join(f"{name}={c}" for name, c in counts.items() if c > 0)
         self.log(f"Job {job_id}: split -> {share_desc}")
         self._emit("split", job_id=job_id, counts={k: v for k, v in counts.items() if v > 0})
+
+        # Track real before/peak CPU & RAM for every device about to do work,
+        # so the UI can show exactly how much load shifted — not just how
+        # many items each device got.
+        tracked_targets = {name for name, c in counts.items() if c > 0}
+        tracked_targets.add("local")  # helper chunks can fall back to local mid-job
+        for name in tracked_targets:
+            rec = self.monitor.get(name)
+            if rec:
+                rec.start_tracking()
 
         results = [None] * num_images
         device_counts = {name: 0 for name in counts}
@@ -164,6 +176,18 @@ class Orchestrator:
         pool.shutdown(wait=True)
         job_wall_seconds = time.monotonic() - job_start_mono
 
+        device_load = {}
+        for name in tracked_targets:
+            rec = self.monitor.get(name)
+            if rec:
+                load = rec.stop_tracking()
+                device_load[name] = load
+                if device_counts.get(name):
+                    self.log(
+                        f"Job {job_id}: {name} CPU {load['baseline_cpu']:.0f}% -> peaked at "
+                        f"{load['peak_cpu']:.0f}% while processing"
+                    )
+
         missing = [i for i, r in enumerate(results) if r is None]
         if missing:
             self.log(
@@ -197,6 +221,7 @@ class Orchestrator:
             missing=len(missing),
             breakdown=device_counts,
             device_elapsed={k: round(v, 2) for k, v in device_elapsed.items()},
+            device_load=device_load,
             job_wall_seconds=round(job_wall_seconds, 2),
             estimated_local_seconds=estimated_local_seconds,
             time_saved_seconds=time_saved_seconds,

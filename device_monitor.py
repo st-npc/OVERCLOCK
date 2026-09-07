@@ -16,6 +16,9 @@ import net_client
 
 HISTORY_LEN = 60          # ~60 samples at 1s poll interval = 60s rolling window
 POLL_INTERVAL = 1.0
+JOB_POLL_INTERVAL = 0.2   # faster cadence while a job is running, so short bursts
+                          # of local/helper load actually get sampled instead of
+                          # falling between two 1s-apart polls
 RAM_FACTOR_CAP_GB = 1.0   # free RAM beyond this doesn't add extra spare-capacity credit
 
 STATUS_CONNECTING = "connecting"
@@ -57,6 +60,18 @@ class DeviceRecord:
         self.history_ram = deque(maxlen=HISTORY_LEN)
         self.history_free_gb = deque(maxlen=HISTORY_LEN)
 
+        # Before/peak load tracking for a single job window (see
+        # start_tracking/stop_tracking) — lets the UI show exactly how much
+        # this device's real load moved during a specific run, rather than
+        # making the user eyeball a 60-point sparkline.
+        self._tracking = False
+        self._track_baseline_cpu = 0.0
+        self._track_baseline_ram = 0.0
+        self._track_baseline_free_gb = 0.0
+        self._track_peak_cpu = 0.0
+        self._track_peak_ram = 0.0
+        self._track_min_free_gb = 0.0
+
     def record_success(self, cpu_percent, ram_percent, ram_free_gb, ram_total_gb, reported_status=None):
         with self.lock:
             self.consecutive_failures = 0
@@ -86,6 +101,11 @@ class DeviceRecord:
             self.history_ram.append(ram_percent)
             self.history_free_gb.append(ram_free_gb)
 
+            if self._tracking:
+                self._track_peak_cpu = max(self._track_peak_cpu, cpu_percent)
+                self._track_peak_ram = max(self._track_peak_ram, ram_percent)
+                self._track_min_free_gb = min(self._track_min_free_gb, ram_free_gb)
+
     def record_failure(self, error: str):
         with self.lock:
             self.consecutive_failures += 1
@@ -97,6 +117,30 @@ class DeviceRecord:
             self.history_cpu.append(0.0)
             self.history_ram.append(self.ram_percent)
             self.history_free_gb.append(0.0)
+
+    def start_tracking(self):
+        """Begin recording before/peak load for one job window. Call
+        stop_tracking() when the window ends to get the result."""
+        with self.lock:
+            self._tracking = True
+            self._track_baseline_cpu = self.cpu_percent
+            self._track_baseline_ram = self.ram_percent
+            self._track_baseline_free_gb = self.ram_free_gb
+            self._track_peak_cpu = self.cpu_percent
+            self._track_peak_ram = self.ram_percent
+            self._track_min_free_gb = self.ram_free_gb
+
+    def stop_tracking(self) -> dict:
+        with self.lock:
+            self._tracking = False
+            return {
+                "baseline_cpu": round(self._track_baseline_cpu, 1),
+                "peak_cpu": round(self._track_peak_cpu, 1),
+                "baseline_ram": round(self._track_baseline_ram, 1),
+                "peak_ram": round(self._track_peak_ram, 1),
+                "baseline_free_gb": round(self._track_baseline_free_gb, 2),
+                "min_free_gb": round(self._track_min_free_gb, 2),
+            }
 
     def set_manual_busy(self, busy: bool):
         with self.lock:
@@ -155,8 +199,28 @@ class DeviceMonitor:
 
         self.passphrase = None  # shared secret sent with every helper request, if set
 
+        self._job_active_lock = threading.Lock()
+        self._job_active_count = 0
+
     def set_passphrase(self, passphrase):
         self.passphrase = passphrase or None
+
+    def begin_job(self):
+        """Switch to fast polling for the duration of a job, so short bursts
+        of CPU/RAM load are actually captured instead of falling between two
+        1s-apart samples. Nestable — polling stays fast until every caller
+        has called end_job(). Takes effect within one poll-loop tick
+        (~0.15s), not a full POLL_INTERVAL."""
+        with self._job_active_lock:
+            self._job_active_count += 1
+
+    def end_job(self):
+        with self._job_active_lock:
+            self._job_active_count = max(0, self._job_active_count - 1)
+
+    def _current_poll_interval(self) -> float:
+        with self._job_active_lock:
+            return JOB_POLL_INTERVAL if self._job_active_count > 0 else POLL_INTERVAL
 
     # -- helper registry -------------------------------------------------
     def add_helper(self, address: str) -> str:
@@ -190,24 +254,32 @@ class DeviceMonitor:
         self._stop_event.set()
 
     def _poll_loop(self):
+        # Ticks every TICK_INTERVAL regardless of mode, but only actually
+        # polls once the *current* interval (1s idle, faster mid-job) has
+        # elapsed since the last poll. This makes begin_job()'s speed-up
+        # take effect within one tick instead of waiting up to a full
+        # POLL_INTERVAL for the loop to come back around.
+        TICK_INTERVAL = 0.15
+        last_poll = 0.0
         while not self._stop_event.is_set():
-            start = time.monotonic()
-            try:
-                stats = _local_stats()
-                self.local.record_success(**stats)
-            except Exception as exc:  # local psutil should never fail, but never crash the loop
-                self.local.record_failure(str(exc))
+            now = time.monotonic()
+            if now - last_poll >= self._current_poll_interval():
+                last_poll = now
+                try:
+                    stats = _local_stats()
+                    self.local.record_success(**stats)
+                except Exception as exc:  # local psutil should never fail, but never crash the loop
+                    self.local.record_failure(str(exc))
 
-            with self._devices_lock:
-                helper_ids = [d for d, rec in self.devices.items() if rec.kind == "helper"]
+                with self._devices_lock:
+                    helper_ids = [d for d, rec in self.devices.items() if rec.kind == "helper"]
 
-            if helper_ids:
-                futures = {self._pool.submit(self._poll_one_helper, hid): hid for hid in helper_ids}
-                for fut in futures:
-                    fut.result()  # exceptions are already caught inside _poll_one_helper
+                if helper_ids:
+                    futures = {self._pool.submit(self._poll_one_helper, hid): hid for hid in helper_ids}
+                    for fut in futures:
+                        fut.result()  # exceptions are already caught inside _poll_one_helper
 
-            elapsed = time.monotonic() - start
-            self._stop_event.wait(max(0.0, POLL_INTERVAL - elapsed))
+            self._stop_event.wait(TICK_INTERVAL)
 
     def _poll_one_helper(self, helper_id: str):
         rec = self.get(helper_id)

@@ -7,6 +7,18 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+  <div id="intro-overlay">
+    <canvas id="intro-canvas"></canvas>
+    <div id="intro-hud">
+      <div class="intro-brand">OVERCLOCK</div>
+      <div class="intro-hint" id="intro-hint">tap the screen</div>
+      <div class="intro-progress" id="intro-progress"></div>
+    </div>
+    <button id="intro-skip" type="button">Skip &rarr;</button>
+  </div>
+
+  <canvas id="bg-canvas"></canvas>
+
   <div class="app">
     <header class="topbar">
       <div class="brand">
@@ -19,6 +31,12 @@
         <span id="run-status-text">Idle</span>
       </div>
     </header>
+
+    <section class="hero-stat" id="hero-stat">
+      <div class="hero-stat-label">Spare capacity available right now</div>
+      <div class="hero-stat-number"><span id="hero-stat-value">0</span><span class="hero-stat-unit">%</span></div>
+      <div class="hero-stat-sub" id="hero-stat-sub">across 1 device</div>
+    </section>
 
     <section class="stress-panel" id="stress-panel">
       <div class="stress-panel-header">
@@ -147,7 +165,10 @@
     </main>
   </div>
 
+  <script src="{{ url_for('static', filename='vendor/three.min.js') }}"></script>
   <script src="{{ url_for('static', filename='sparkline.js') }}"></script>
+  <script src="{{ url_for('static', filename='bg.js') }}"></script>
+  <script src="{{ url_for('static', filename='intro.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

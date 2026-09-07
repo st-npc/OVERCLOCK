@@ -19,6 +19,8 @@
   const summaryResult = document.getElementById("summary-result");
   const summarySaved = document.getElementById("summary-saved");
   const summaryCompression = document.getElementById("summary-compression");
+  const heroValueEl = document.getElementById("hero-stat-value");
+  const heroSubEl = document.getElementById("hero-stat-sub");
   const splitEmpty = document.getElementById("split-empty");
   const splitBarEl = document.getElementById("split-bar");
   const splitLegendEl = document.getElementById("split-legend");
@@ -36,6 +38,7 @@
   let splitTotal = 0;
   let doneCounts = {};
   let doneElapsed = {};
+  let deviceLoad = {};
   let failedTargets = new Set();
 
   function colorForDevice(id) {
@@ -196,6 +199,7 @@
     splitTotal = 0;
     doneCounts = {};
     doneElapsed = {};
+    deviceLoad = {};
     failedTargets = new Set();
     splitEmpty.hidden = false;
     splitBarEl.hidden = true;
@@ -209,6 +213,7 @@
     splitTotal = Object.values(splitCounts).reduce((a, b) => a + b, 0);
     doneCounts = {};
     doneElapsed = {};
+    deviceLoad = {};
     failedTargets = new Set();
     renderSplit();
   }
@@ -258,9 +263,16 @@
         const name = deviceNames.get(t) || t;
         const elapsed = doneElapsed[t] || 0;
         const throughput = isComplete && elapsed > 0 ? ` <span class="split-legend-rate">(${(done / elapsed).toFixed(1)} img/s)</span>` : "";
+        const load = deviceLoad[t];
+        const loadHtml = load
+          ? `<div class="split-legend-load">CPU ${load.baseline_cpu.toFixed(0)}%&rarr;${load.peak_cpu.toFixed(0)}% &middot; RAM ${load.baseline_ram.toFixed(0)}%&rarr;${load.peak_ram.toFixed(0)}%</div>`
+          : "";
         return `<div class="split-legend-item ${isComplete ? "is-done" : ""}">
           <span class="split-legend-swatch" style="background:${color}"></span>
-          ${escapeHtml(name)}: <span class="split-legend-count">${display}</span>${throughput}
+          <div class="split-legend-text">
+            <div class="split-legend-main">${escapeHtml(name)}: <span class="split-legend-count">${display}</span>${throughput}</div>
+            ${loadHtml}
+          </div>
         </div>`;
       })
       .join("");
@@ -272,7 +284,7 @@
 
     const color = colorForDevice(device.id);
     const root = document.createElement("article");
-    root.className = "device-card " + (device.kind === "local" ? "local" : "helper");
+    root.className = "device-card entering " + (device.kind === "local" ? "local" : "helper");
     root.style.setProperty("--dev-accent", color);
     root.innerHTML = `
       <div class="device-card-header">
@@ -370,10 +382,44 @@
     };
   }
 
+  // ---------------- hero stat ----------------
+  let heroTweenRaf = null;
+  let heroDisplayed = null;
+  function animateHeroValue(target) {
+    const start = heroDisplayed == null ? target : heroDisplayed;
+    const t0 = performance.now();
+    const DURATION = 500;
+    if (heroTweenRaf) cancelAnimationFrame(heroTweenRaf);
+    function step(now) {
+      const p = Math.min(1, (now - t0) / DURATION);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const value = start + (target - start) * eased;
+      heroValueEl.textContent = Math.round(value);
+      if (p < 1) {
+        heroTweenRaf = requestAnimationFrame(step);
+      } else {
+        heroDisplayed = target;
+      }
+    }
+    heroTweenRaf = requestAnimationFrame(step);
+  }
+
+  function renderHeroStat(devices) {
+    if (!heroValueEl || !devices || devices.length === 0) return;
+    const usable = devices.filter((d) => d.status !== "unreachable" && d.status !== "paused");
+    const avgSpare = usable.length
+      ? usable.reduce((sum, d) => sum + (d.spare_score || 0), 0) / usable.length
+      : 0;
+    animateHeroValue(Math.round(avgSpare * 100));
+    const n = devices.length;
+    heroSubEl.textContent = n === 1 ? "across 1 device" : `across ${n} devices`;
+  }
+
   function handleEvent(evt) {
     switch (evt.type) {
       case "stats":
         (evt.devices || []).forEach(renderDevice);
+        renderHeroStat(evt.devices || []);
         break;
       case "log":
         appendLog(evt);
@@ -417,6 +463,7 @@
         summaryCompression.textContent =
           evt.avg_compression_ratio != null ? `${Math.round(evt.avg_compression_ratio * 100)}% of original` : "—";
 
+        deviceLoad = evt.device_load || {};
         renderSplit();
         break;
       default:
