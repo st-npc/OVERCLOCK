@@ -138,6 +138,90 @@ html, body {
   50% { opacity: 0.45; }
 }
 
+/* ---------- stress panel ---------- */
+.stress-panel {
+  background: var(--amber-soft);
+  border: 1.5px dashed var(--amber);
+  border-radius: var(--radius);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.stress-panel-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 560px;
+}
+
+.stress-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #8a5700;
+}
+
+.stress-icon { font-size: 14px; }
+
+.stress-badge {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background: var(--amber);
+  color: #452b00;
+  padding: 2px 8px;
+  border-radius: 999px;
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+.stress-hint {
+  font-size: 11.5px;
+  color: #8a5700;
+  opacity: 0.85;
+}
+
+.stress-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.stress-controls .field label { color: #8a5700; }
+.stress-controls input {
+  width: 90px;
+  background: #fff;
+  border: 1.5px solid var(--amber);
+}
+
+.btn-stress {
+  background: var(--amber);
+  color: #452b00;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 10px 20px;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+  height: 40px;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.btn-stress:hover { background: #e8a93a; }
+.btn-stress:active { transform: scale(0.97); }
+
+.btn-stress.active {
+  background: var(--red);
+  color: #fff;
+}
+.btn-stress.active:hover { background: #d43f3a; }
+
 /* ---------- control panel ---------- */
 .control-panel {
   background: var(--bg-panel);

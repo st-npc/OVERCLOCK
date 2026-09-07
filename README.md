@@ -8,6 +8,31 @@ only what's available.
 
 ## Running it
 
+**Easiest way**: one command handles the venv (first run only), starts the
+orchestrator plus 2 local helpers (so you immediately see multi-device
+behavior), and opens the dashboard in your browser. Ctrl+C stops
+everything.
+
+```bash
+./run.sh          # main + 2 local helpers
+./run.sh 0        # main only, fully local
+./run.sh 4        # main + 4 local helpers
+```
+
+On macOS you can instead just **double-click `Overclock.command`** in
+Finder — no terminal typing at all (it still opens a terminal window to
+run in, since these are long-running local servers, but you don't have to
+type anything into it). On Windows, `run.bat` does the same thing (not
+independently tested on real Windows — if it misbehaves, fall back to the
+manual steps below and let me know what broke).
+
+Set `OVERCLOCK_MAIN_PORT`/`OVERCLOCK_HELPER_BASE_PORT` env vars to change
+the default ports (5050 / 5001) — useful on macOS where port 5000 itself
+is usually taken by AirPlay Receiver.
+
+<details>
+<summary>Manual steps (what run.sh does, if you want to run pieces yourself)</summary>
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -21,12 +46,13 @@ on a different port, to simulate a second device):
 python app_helper.py --port 5001
 ```
 
-Start the orchestrator + dashboard (on macOS, port 5000 is often taken by
-AirPlay Receiver — use another port if `app_main.py` fails to bind):
+Start the orchestrator + dashboard:
 
 ```bash
 python app_main.py --port 5050
 ```
+
+</details>
 
 Open `http://localhost:5050`, add each helper's `host:port` under
 **Helper devices**, set a batch size, and click **Start** — this both
@@ -45,7 +71,38 @@ The main dashboard also has a **"Who's doing the work"** panel: a live bar
 showing exactly what fraction of the current batch went to the local
 device versus each helper, filling in per-device as chunks complete.
 
+### Demoing the adaptive offload: "Simulate local overload"
+
+The amber panel at the top of the dashboard (`stress.py`) generates real
+CPU/RAM load on your local device — actual busy OS processes, not a fake
+flag — so you can demo the core "struggling laptop" story on demand
+instead of needing your machine to genuinely be busy:
+
+1. Set CPU workers / RAM (MB) and click **Start Overload**. Watch *This
+   device*'s card: CPU%, RAM%, and spare capacity all react for real,
+   same as any other load would.
+2. With one or more helpers configured, click the real **Start** button.
+   Because the split (`orchestrator._compute_shares`) already reduces the
+   local share as local load rises, you'll see the batch shift hard
+   toward the helper — the "Who's doing the work" panel and the helper's
+   own card show it visibly taking on the work your overloaded device
+   couldn't.
+3. **Stop Overload** to release the CPU workers and freed RAM immediately
+   and watch the local card recover.
+
+This is a demo/testing tool, not part of the sharing pipeline — it works
+purely by making the local machine genuinely busier, so orchestrator.py
+and device_monitor.py need zero awareness of it. Workers run as daemon
+OS processes (not threads, so they use real cores instead of being
+capped by the GIL) and are capped (CPU workers ≤ core count, RAM stress
+never eats past a 512MB floor of free memory) so it can't actually crash
+your machine; they're also killed automatically if `app_main.py` itself
+exits, even uncleanly.
+
 ### Simulating multiple devices on one machine
+
+`./run.sh` already does this (2 local helpers by default) — the manual
+version, if you want more control over the count or ports:
 
 ```bash
 python app_helper.py --port 5001
@@ -75,6 +132,7 @@ every image accounted for.
 | `device_monitor.py` | Local + helper stats polling, rolling ~60s history for sparklines, status state machine (`idle`/`busy`/`unreachable`/`reconnecting`), spare-capacity scoring. |
 | `orchestrator.py` | Job lifecycle: reachability probe → proportional split → concurrent dispatch → per-chunk fallback on failure → ordered merge → `processed_output/`. |
 | `interfaces.py` | Best-effort local network interface detection (used to surface a USB-C link in the dashboard). |
+| `stress.py` | Demo-only local CPU/RAM load generator (see "Simulate local overload" below). Not used by the sharing pipeline. |
 | `wire.py` | zlib+JSON payload compression shared by every transport. |
 | `relay_client.py` / `relay_server.py` | Cross-network relay tunnel — see below. `relay_server.py` is standalone and self-hostable. |
 | `app_helper.py` | Helper Flask service: `GET /stats`, `POST /process`, optional relay-polling thread. |

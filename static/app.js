@@ -459,6 +459,68 @@
 
   refreshIfacesBtn.addEventListener("click", loadInterfaces);
 
+  // ---------------- local overload simulator ----------------
+  const stressCpuInput = document.getElementById("stress-cpu");
+  const stressRamInput = document.getElementById("stress-ram");
+  const stressToggleBtn = document.getElementById("stress-toggle");
+  const stressBadge = document.getElementById("stress-badge");
+
+  function renderStressStatus(status) {
+    if (status.active) {
+      stressToggleBtn.textContent = "Stop Overload";
+      stressToggleBtn.classList.add("active");
+      stressBadge.hidden = false;
+      stressBadge.textContent = `ACTIVE — ${status.cpu_workers} CPU worker(s), ${status.ram_mb} MB RAM`;
+      stressCpuInput.disabled = true;
+      stressRamInput.disabled = true;
+    } else {
+      stressToggleBtn.textContent = "Start Overload";
+      stressToggleBtn.classList.remove("active");
+      stressBadge.hidden = true;
+      stressCpuInput.disabled = false;
+      stressRamInput.disabled = false;
+    }
+  }
+
+  async function loadStressStatus() {
+    try {
+      const resp = await fetch("/api/load");
+      const status = await resp.json();
+      if (status.max_cpu_workers) stressCpuInput.max = status.max_cpu_workers;
+      if (status.max_ram_mb) stressRamInput.max = status.max_ram_mb;
+      renderStressStatus(status);
+    } catch (_err) {
+      // leave controls as-is; next poll will reconcile
+    }
+  }
+
+  stressToggleBtn.addEventListener("click", async () => {
+    stressToggleBtn.disabled = true;
+    try {
+      const isActive = stressToggleBtn.classList.contains("active");
+      const resp = await fetch(isActive ? "/api/load/stop" : "/api/load/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: isActive
+          ? undefined
+          : JSON.stringify({
+              cpu_workers: parseInt(stressCpuInput.value, 10) || 0,
+              ram_mb: parseInt(stressRamInput.value, 10) || 0,
+            }),
+      });
+      const status = await resp.json();
+      if (!resp.ok) {
+        appendLog({ level: "error", message: status.error || "Could not change overload state", ts: Date.now() / 1000 });
+      } else {
+        renderStressStatus(status);
+      }
+    } catch (err) {
+      appendLog({ level: "error", message: `Could not reach the orchestrator: ${err}`, ts: Date.now() / 1000 });
+    } finally {
+      stressToggleBtn.disabled = false;
+    }
+  });
+
   // ---------------- init ----------------
   async function init() {
     try {
@@ -478,6 +540,8 @@
     connectEvents();
     loadInterfaces();
     loadTaskChoices();
+    loadStressStatus();
+    setInterval(loadStressStatus, 4000);
   }
 
   init();

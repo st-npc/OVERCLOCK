@@ -20,6 +20,31 @@
       </div>
     </header>
 
+    <section class="stress-panel" id="stress-panel">
+      <div class="stress-panel-header">
+        <div class="stress-panel-title">
+          <span class="stress-icon">&#9889;</span>
+          Simulate local overload
+          <span class="stress-badge" id="stress-badge" hidden>ACTIVE</span>
+        </div>
+        <span class="stress-hint">
+          Deliberately load <em>this</em> device with real CPU/RAM work — a demo tool, separate from
+          actual sharing — so you can see the dashboard react and the next run offload accordingly.
+        </span>
+      </div>
+      <div class="stress-controls">
+        <div class="field">
+          <label for="stress-cpu">CPU workers</label>
+          <input type="number" id="stress-cpu" value="4" min="0" max="32">
+        </div>
+        <div class="field">
+          <label for="stress-ram">RAM (MB)</label>
+          <input type="number" id="stress-ram" value="512" min="0" max="4096" step="128">
+        </div>
+        <button id="stress-toggle" class="btn-stress" type="button">Start Overload</button>
+      </div>
+    </section>
+
     <section class="control-panel">
       <div class="control-row">
         <div class="field">

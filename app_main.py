@@ -13,12 +13,15 @@ from flask import Flask, Response, jsonify, render_template, request
 from device_monitor import DeviceMonitor
 from interfaces import list_network_interfaces
 from orchestrator import JobAlreadyRunningError, Orchestrator
+from stress import LoadGenerator
 from tasks import DEFAULT_TASK, TASKS, task_choices
 
 app = Flask(__name__)
 
 monitor = DeviceMonitor()
 monitor.start()
+
+load_generator = LoadGenerator()
 
 
 class EventBus:
@@ -75,6 +78,29 @@ def api_interfaces():
 @app.get("/api/tasks")
 def api_tasks():
     return jsonify({"tasks": task_choices(), "default": DEFAULT_TASK})
+
+
+@app.get("/api/load")
+def api_load_status():
+    return jsonify(load_generator.status())
+
+
+@app.post("/api/load/start")
+def api_load_start():
+    payload = request.get_json(silent=True) or {}
+    cpu_workers = payload.get("cpu_workers", 0)
+    ram_mb = payload.get("ram_mb", 0)
+    if not isinstance(cpu_workers, int) or not isinstance(ram_mb, int):
+        return jsonify({"error": "'cpu_workers' and 'ram_mb' must be integers"}), 400
+    if cpu_workers <= 0 and ram_mb <= 0:
+        return jsonify({"error": "set at least one of 'cpu_workers' or 'ram_mb' above zero"}), 400
+    status = load_generator.start(cpu_workers, ram_mb)
+    return jsonify(status)
+
+
+@app.post("/api/load/stop")
+def api_load_stop():
+    return jsonify(load_generator.stop())
 
 
 @app.post("/api/start")

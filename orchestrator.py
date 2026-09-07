@@ -77,13 +77,20 @@ class Orchestrator:
         self.log(f"Job {job_id}: generating {num_images} work item(s) for '{task_mod.DISPLAY_NAME}'")
         items = task_mod.generate_work(num_images)
 
-        reachable = self._probe_helpers(helper_addresses)
+        reachable, probe_summary = self._probe_helpers(helper_addresses)
         if helper_addresses and not reachable:
-            self.log(
-                f"Job {job_id}: none of {len(helper_addresses)} configured helper(s) are reachable — "
-                "falling back to fully local processing",
-                level="warn",
-            )
+            if probe_summary["unreachable"] == len(helper_addresses):
+                reason = f"none of {len(helper_addresses)} configured helper(s) are reachable"
+            else:
+                bits = []
+                if probe_summary["no_capacity"]:
+                    bits.append(f"{probe_summary['no_capacity']} reachable but with no spare capacity")
+                if probe_summary["paused"]:
+                    bits.append(f"{probe_summary['paused']} paused by their operator")
+                if probe_summary["unreachable"]:
+                    bits.append(f"{probe_summary['unreachable']} unreachable")
+                reason = f"none of {len(helper_addresses)} configured helper(s) can take work right now ({', '.join(bits)})"
+            self.log(f"Job {job_id}: {reason} — falling back to fully local processing", level="warn")
         elif not helper_addresses:
             self.log(f"Job {job_id}: no helpers configured — running fully local", level="info")
 
@@ -196,11 +203,12 @@ class Orchestrator:
             avg_compression_ratio=round(sum(compression_ratios) / len(compression_ratios), 4) if compression_ratios else None,
         )
 
-    def _probe_helpers(self, helper_addresses: list) -> list:
+    def _probe_helpers(self, helper_addresses: list) -> tuple:
         """Fresh reachability probe at job start (not just relying on the
         1s-cadence background poll), so brand-new helpers configured in the
         same Start click are picked up immediately."""
         reachable = []
+        summary = {"unreachable": 0, "no_capacity": 0, "paused": 0}
         for addr in helper_addresses:
             self.monitor.add_helper(addr)
             rec = self.monitor.get(addr)
@@ -217,13 +225,16 @@ class Orchestrator:
                 if snap["status"] in ("idle", "reconnecting") and snap["spare_score"] > 0:
                     reachable.append((addr, snap["spare_score"]))
                 elif snap["status"] == "paused":
+                    summary["paused"] += 1
                     self.log(f"Helper {addr} is paused by its operator — not sending it work", level="warn")
                 else:
+                    summary["no_capacity"] += 1
                     self.log(f"Helper {addr} reachable but reports no spare capacity right now", level="warn")
             except net_client.HelperError as exc:
+                summary["unreachable"] += 1
                 rec.record_failure(str(exc))
                 self.log(f"Helper {addr} unreachable at job start ({exc})", level="warn")
-        return reachable
+        return reachable, summary
 
     def _compute_shares(self, reachable_helpers: list) -> dict:
         local_snap = self.monitor.local.snapshot()
