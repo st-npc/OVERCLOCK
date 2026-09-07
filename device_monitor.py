@@ -23,19 +23,18 @@ STATUS_IDLE = "idle"
 STATUS_BUSY = "busy"
 STATUS_UNREACHABLE = "unreachable"
 STATUS_RECONNECTING = "reconnecting"
+STATUS_PAUSED = "paused"  # helper is reachable but its operator disabled receiving
+
+# Statuses that never have spare capacity to hand out, regardless of load.
+_NO_CAPACITY_STATUSES = (STATUS_UNREACHABLE, STATUS_CONNECTING, STATUS_BUSY, STATUS_PAUSED)
 
 
 def _spare_score(status: str, cpu_percent: float, ram_free_gb: float) -> float:
-    if status in (STATUS_UNREACHABLE, STATUS_CONNECTING):
+    if status in _NO_CAPACITY_STATUSES:
         return 0.0
     cpu_headroom = max(0.0, 100.0 - cpu_percent) / 100.0
     ram_factor = min(1.0, ram_free_gb / RAM_FACTOR_CAP_GB) if ram_free_gb > 0 else 0.0
-    score = cpu_headroom * ram_factor
-    if status == STATUS_BUSY:
-        # Already working on something for us right now — no free capacity
-        # to hand out until the current chunk finishes.
-        return 0.0
-    return round(score, 4)
+    return round(cpu_headroom * ram_factor, 4)
 
 
 class DeviceRecord:
@@ -72,6 +71,8 @@ class DeviceRecord:
                 new_status = STATUS_BUSY
             elif reported_status == STATUS_BUSY:
                 new_status = STATUS_BUSY
+            elif reported_status == STATUS_PAUSED:
+                new_status = STATUS_PAUSED
             elif self.status == STATUS_UNREACHABLE:
                 # First successful poll after being down: show as
                 # "reconnecting" for one cycle before trusting it fully.
@@ -152,6 +153,11 @@ class DeviceMonitor:
         self._thread = None
         self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="monitor-poll")
 
+        self.passphrase = None  # shared secret sent with every helper request, if set
+
+    def set_passphrase(self, passphrase):
+        self.passphrase = passphrase or None
+
     # -- helper registry -------------------------------------------------
     def add_helper(self, address: str) -> str:
         address = address.strip()
@@ -208,7 +214,7 @@ class DeviceMonitor:
         if rec is None:
             return
         try:
-            data = net_client.fetch_stats(helper_id)
+            data = net_client.fetch_stats(helper_id, passphrase=self.passphrase)
             rec.record_success(
                 cpu_percent=data["cpu_percent"],
                 ram_percent=data["ram_percent"],

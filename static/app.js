@@ -3,10 +3,13 @@
 
   const devicesEl = document.getElementById("devices");
   const logBody = document.getElementById("log-body");
+  const logFilters = document.getElementById("log-filters");
   const startBtn = document.getElementById("start-btn");
   const addHelperBtn = document.getElementById("add-helper");
   const helperList = document.getElementById("helper-list");
   const numImagesInput = document.getElementById("num-images");
+  const taskTypeSelect = document.getElementById("task-type");
+  const passphraseInput = document.getElementById("passphrase");
   const runStatusEl = document.getElementById("run-status");
   const runStatusText = document.getElementById("run-status-text");
   const summaryStrip = document.getElementById("summary-strip");
@@ -14,11 +17,33 @@
   const summaryElapsed = document.getElementById("summary-elapsed");
   const summaryImages = document.getElementById("summary-images");
   const summaryResult = document.getElementById("summary-result");
+  const summarySaved = document.getElementById("summary-saved");
+  const summaryCompression = document.getElementById("summary-compression");
+  const splitEmpty = document.getElementById("split-empty");
+  const splitBarEl = document.getElementById("split-bar");
+  const splitLegendEl = document.getElementById("split-legend");
+  const splitTotalEl = document.getElementById("split-total");
 
   const MAX_LOG_LINES = 400;
+  const DEVICE_COLOR_COUNT = 6;
   const cardEls = new Map(); // device id -> { root, sparks: {cpu,ram,free_gb} }
+  const deviceColorIndex = new Map();
+  const deviceNames = new Map();
   let elapsedTimer = null;
   let jobStartTs = null;
+
+  let splitCounts = {};
+  let splitTotal = 0;
+  let doneCounts = {};
+  let doneElapsed = {};
+  let failedTargets = new Set();
+
+  function colorForDevice(id) {
+    if (!deviceColorIndex.has(id)) {
+      deviceColorIndex.set(id, deviceColorIndex.size % DEVICE_COLOR_COUNT);
+    }
+    return `var(--dev-color-${deviceColorIndex.get(id)})`;
+  }
 
   // ---------------- helper row management ----------------
   addHelperBtn.addEventListener("click", () => addHelperRow());
@@ -48,18 +73,39 @@
     return String(s).replace(/"/g, "&quot;");
   }
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
   // ---------------- start flow ----------------
+  async function loadTaskChoices() {
+    try {
+      const resp = await fetch("/api/tasks");
+      const data = await resp.json();
+      const choices = data.tasks || [];
+      taskTypeSelect.innerHTML = choices.map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join("");
+      if (data.default) taskTypeSelect.value = data.default;
+    } catch (_err) {
+      taskTypeSelect.innerHTML = '<option value="image">Image batch</option>';
+    }
+  }
+
   startBtn.addEventListener("click", async () => {
     const helpers = getHelperAddresses();
     const numImages = Math.max(1, Math.min(200, parseInt(numImagesInput.value, 10) || 24));
+    const taskType = taskTypeSelect.value || "image";
+    const passphrase = passphraseInput.value || null;
 
     startBtn.disabled = true;
     startBtn.textContent = "Running...";
     clearLog();
+    resetSplit();
     setRunStatus("running", "Starting...");
     summaryStrip.hidden = false;
     summaryJob.textContent = "—";
     summaryResult.textContent = "—";
+    summarySaved.textContent = "—";
+    summaryCompression.textContent = "—";
     summaryImages.textContent = `0 / ${numImages}`;
     startElapsedTimer();
 
@@ -67,7 +113,7 @@
       const resp = await fetch("/api/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ helpers, num_images: numImages }),
+        body: JSON.stringify({ helpers, num_images: numImages, task_type: taskType, passphrase }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -117,10 +163,12 @@
 
   function appendLog(evt) {
     const line = document.createElement("div");
+    const level = evt.level || "info";
     line.className = "log-line";
+    line.dataset.level = level;
     const t = new Date((evt.ts || Date.now() / 1000) * 1000);
     const timeStr = t.toLocaleTimeString([], { hour12: false });
-    line.innerHTML = `<span class="log-time">${timeStr}</span><span class="log-msg level-${evt.level || "info"}"></span>`;
+    line.innerHTML = `<span class="log-time">${timeStr}</span><span class="log-msg level-${level}"></span>`;
     line.querySelector(".log-msg").textContent = evt.message || "";
     logBody.appendChild(line);
     while (logBody.children.length > MAX_LOG_LINES) {
@@ -129,12 +177,103 @@
     logBody.scrollTop = logBody.scrollHeight;
   }
 
+  logFilters.addEventListener("click", (e) => {
+    const btn = e.target.closest(".log-filter-chip");
+    if (!btn) return;
+    logFilters.querySelectorAll(".log-filter-chip").forEach((c) => c.classList.remove("active"));
+    btn.classList.add("active");
+    const level = btn.dataset.level;
+    if (level === "all") {
+      delete logBody.dataset.filter;
+    } else {
+      logBody.dataset.filter = level;
+    }
+  });
+
+  // ---------------- work split panel ----------------
+  function resetSplit() {
+    splitCounts = {};
+    splitTotal = 0;
+    doneCounts = {};
+    doneElapsed = {};
+    failedTargets = new Set();
+    splitEmpty.hidden = false;
+    splitBarEl.hidden = true;
+    splitBarEl.innerHTML = "";
+    splitLegendEl.innerHTML = "";
+    splitTotalEl.textContent = "";
+  }
+
+  function handleSplit(evt) {
+    splitCounts = evt.counts || {};
+    splitTotal = Object.values(splitCounts).reduce((a, b) => a + b, 0);
+    doneCounts = {};
+    doneElapsed = {};
+    failedTargets = new Set();
+    renderSplit();
+  }
+
+  function handleChunkDone(evt) {
+    doneCounts[evt.target] = (doneCounts[evt.target] || 0) + evt.count;
+    doneElapsed[evt.target] = (doneElapsed[evt.target] || 0) + (evt.elapsed || 0);
+    renderSplit();
+  }
+
+  function handleChunkFailed(evt) {
+    failedTargets.add(evt.target);
+    renderSplit();
+  }
+
+  function renderSplit() {
+    const targets = Object.keys(splitCounts);
+    if (targets.length === 0 || splitTotal === 0) return;
+
+    splitEmpty.hidden = true;
+    splitBarEl.hidden = false;
+
+    const doneTotal = Object.values(doneCounts).reduce((a, b) => a + b, 0);
+    splitTotalEl.textContent = `${Math.min(doneTotal, splitTotal)} / ${splitTotal} done`;
+
+    splitBarEl.innerHTML = targets
+      .map((t) => {
+        const pct = ((splitCounts[t] / splitTotal) * 100).toFixed(2);
+        const color = colorForDevice(t);
+        const isFailed = failedTargets.has(t);
+        const isDone = !isFailed && (doneCounts[t] || 0) >= splitCounts[t];
+        const cls = isFailed ? "failed" : isDone ? "done" : "pending";
+        const name = deviceNames.get(t) || t;
+        const tooltip = `${name}: ${splitCounts[t]} image(s)${isFailed ? " — dropped, reassigned" : ""}`;
+        return `<div class="split-seg ${cls}" style="flex-basis:${pct}%;background:${color}" data-tooltip="${escapeAttr(tooltip)}"></div>`;
+      })
+      .join("");
+
+    const allTargets = new Set([...targets, ...Object.keys(doneCounts)]);
+    splitLegendEl.innerHTML = Array.from(allTargets)
+      .map((t) => {
+        const done = doneCounts[t] || 0;
+        const planned = splitCounts[t] || 0;
+        const display = Math.max(done, planned) === planned && done === 0 ? planned : done;
+        const color = colorForDevice(t);
+        const isComplete = done >= planned && planned > 0 && !failedTargets.has(t);
+        const name = deviceNames.get(t) || t;
+        const elapsed = doneElapsed[t] || 0;
+        const throughput = isComplete && elapsed > 0 ? ` <span class="split-legend-rate">(${(done / elapsed).toFixed(1)} img/s)</span>` : "";
+        return `<div class="split-legend-item ${isComplete ? "is-done" : ""}">
+          <span class="split-legend-swatch" style="background:${color}"></span>
+          ${escapeHtml(name)}: <span class="split-legend-count">${display}</span>${throughput}
+        </div>`;
+      })
+      .join("");
+  }
+
   // ---------------- device cards ----------------
   function ensureCard(device) {
     if (cardEls.has(device.id)) return cardEls.get(device.id);
 
+    const color = colorForDevice(device.id);
     const root = document.createElement("article");
     root.className = "device-card " + (device.kind === "local" ? "local" : "helper");
+    root.style.setProperty("--dev-accent", color);
     root.innerHTML = `
       <div class="device-card-header">
         <div class="device-name">
@@ -153,8 +292,10 @@
         <div class="capacity-bar"><div class="capacity-fill"></div></div>
       </div>
       <div class="device-error" hidden></div>
+      <div class="device-extra"></div>
     `;
     root.querySelector(".device-name-text").textContent = device.name;
+    root.addEventListener("click", () => root.classList.toggle("expanded"));
     devicesEl.appendChild(root);
 
     const sparks = {
@@ -177,6 +318,7 @@
   }
 
   function renderDevice(device) {
+    deviceNames.set(device.id, device.name);
     const { root, sparks } = ensureCard(device);
 
     const pill = root.querySelector(".status-pill");
@@ -199,41 +341,16 @@
       errEl.hidden = true;
     }
 
-    drawSpark(sparks.cpu, device.history.cpu, 100, "#5b9dff");
-    drawSpark(sparks.ram, device.history.ram, 100, "#f5b94d");
+    root.querySelector(".device-extra").innerHTML = `
+      <span>RAM: ${device.ram_free_gb.toFixed(2)} GB free / ${device.ram_total_gb.toFixed(2)} GB total</span>
+      <span>Status: ${device.status}${device.last_error ? " — " + escapeHtml(device.last_error) : ""}</span>
+      <span>Click card to collapse</span>
+    `;
+
+    drawSpark(sparks.cpu, device.history.cpu, 100, "#3b82f6");
+    drawSpark(sparks.ram, device.history.ram, 100, "#f59e0b");
     const ramCap = Math.max(device.ram_total_gb || 1, 1);
-    drawSpark(sparks.free_gb, device.history.free_gb, ramCap, "#4fd1c5");
-  }
-
-  function drawSpark(canvas, values, maxValue, color) {
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const w = canvas.width;
-    const h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-    if (!values || values.length === 0) return;
-
-    const n = values.length;
-    const max = Math.max(maxValue, ...values, 0.001);
-    const stepX = n > 1 ? w / (n - 1) : w;
-
-    ctx.beginPath();
-    values.forEach((v, i) => {
-      const x = i * stepX;
-      const y = h - (Math.max(0, Math.min(v, max)) / max) * (h - 4) - 2;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.lineJoin = "round";
-    ctx.stroke();
-
-    ctx.lineTo(w, h);
-    ctx.lineTo(0, h);
-    ctx.closePath();
-    ctx.fillStyle = color + "22";
-    ctx.fill();
+    drawSpark(sparks.free_gb, device.history.free_gb, ramCap, "#0fb896");
   }
 
   // ---------------- SSE ----------------
@@ -262,8 +379,17 @@
         appendLog(evt);
         break;
       case "job_start":
-        summaryJob.textContent = evt.job_id;
+        summaryJob.textContent = evt.task_name ? `${evt.job_id} (${evt.task_name})` : evt.job_id;
         summaryImages.textContent = `0 / ${evt.num_images}`;
+        break;
+      case "split":
+        handleSplit(evt);
+        break;
+      case "chunk_done":
+        handleChunkDone(evt);
+        break;
+      case "chunk_failed":
+        handleChunkFailed(evt);
         break;
       case "done":
         stopElapsedTimer();
@@ -277,6 +403,21 @@
           summaryResult.textContent = evt.error ? "error" : `${evt.missing || 0} missing`;
           setRunStatus(evt.error ? "error" : "warn", evt.error ? "Failed" : "Completed with issues");
         }
+
+        if (evt.time_saved_seconds != null && evt.estimated_local_seconds != null) {
+          const pct = evt.estimated_local_seconds > 0 ? Math.round((evt.time_saved_seconds / evt.estimated_local_seconds) * 100) : 0;
+          summarySaved.textContent =
+            evt.time_saved_seconds > 0.01
+              ? `${evt.time_saved_seconds.toFixed(2)}s faster (~${pct}%)`
+              : "no faster (fully local)";
+        } else {
+          summarySaved.textContent = "—";
+        }
+
+        summaryCompression.textContent =
+          evt.avg_compression_ratio != null ? `${Math.round(evt.avg_compression_ratio * 100)}% of original` : "—";
+
+        renderSplit();
         break;
       default:
         break;
@@ -336,6 +477,7 @@
     }
     connectEvents();
     loadInterfaces();
+    loadTaskChoices();
   }
 
   init();

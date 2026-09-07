@@ -13,6 +13,7 @@ from flask import Flask, Response, jsonify, render_template, request
 from device_monitor import DeviceMonitor
 from interfaces import list_network_interfaces
 from orchestrator import JobAlreadyRunningError, Orchestrator
+from tasks import DEFAULT_TASK, TASKS, task_choices
 
 app = Flask(__name__)
 
@@ -71,6 +72,11 @@ def api_interfaces():
     return jsonify({"interfaces": list_network_interfaces()})
 
 
+@app.get("/api/tasks")
+def api_tasks():
+    return jsonify({"tasks": task_choices(), "default": DEFAULT_TASK})
+
+
 @app.post("/api/start")
 def api_start():
     if orchestrator.is_running():
@@ -103,15 +109,24 @@ def api_start():
     if not isinstance(num_images, int) or not (1 <= num_images <= 200):
         return jsonify({"error": "'num_images' must be an integer between 1 and 200"}), 400
 
+    task_type = payload.get("task_type", DEFAULT_TASK)
+    if task_type not in TASKS:
+        return jsonify({"error": f"'task_type' must be one of {sorted(TASKS.keys())}"}), 400
+
+    passphrase = payload.get("passphrase")
+    if passphrase is not None and not isinstance(passphrase, str):
+        return jsonify({"error": "'passphrase' must be a string"}), 400
+    monitor.set_passphrase(passphrase)
+
     for addr in helpers:
         monitor.add_helper(addr)
 
     try:
-        orchestrator.start_job_async(helpers, num_images)
+        orchestrator.start_job_async(helpers, num_images, task_type)
     except JobAlreadyRunningError:
         return jsonify({"error": "a job is already running"}), 409
 
-    return jsonify({"ok": True, "helpers": helpers, "num_images": num_images})
+    return jsonify({"ok": True, "helpers": helpers, "num_images": num_images, "task_type": task_type})
 
 
 @app.get("/api/events")

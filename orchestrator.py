@@ -13,8 +13,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import net_client
-import task
 from device_monitor import DeviceMonitor
+from tasks import DEFAULT_TASK, get_task
 
 OUTPUT_DIR = "processed_output"
 MIN_LOCAL_SHARE = 0.2   # local always keeps at least this fraction, even fully loaded
@@ -43,21 +43,21 @@ class Orchestrator:
         with self._job_lock:
             return self._job_running
 
-    def start_job_async(self, helper_addresses: list, num_images: int = 24):
+    def start_job_async(self, helper_addresses: list, num_images: int = 24, task_type: str = DEFAULT_TASK):
         with self._job_lock:
             if self._job_running:
                 raise JobAlreadyRunningError("A job is already running")
             self._job_running = True
         thread = threading.Thread(
-            target=self._run_job_safely, args=(helper_addresses, num_images), daemon=True
+            target=self._run_job_safely, args=(helper_addresses, num_images, task_type), daemon=True
         )
         thread.start()
 
-    def _run_job_safely(self, helper_addresses, num_images):
+    def _run_job_safely(self, helper_addresses, num_images, task_type):
         job_id = uuid.uuid4().hex[:8]
         self.current_job_id = job_id
         try:
-            self._run_job(job_id, helper_addresses, num_images)
+            self._run_job(job_id, helper_addresses, num_images, task_type)
         except Exception as exc:  # a bug here must never leave the UI stuck
             self.log(f"Job {job_id} failed unexpectedly: {exc}", level="error")
             self._emit("done", job_id=job_id, ok=False, error=str(exc))
@@ -67,11 +67,15 @@ class Orchestrator:
             self.monitor.local.set_manual_busy(False)
 
     # -- core job logic --------------------------------------------------
-    def _run_job(self, job_id: str, helper_addresses: list, num_images: int):
+    def _run_job(self, job_id: str, helper_addresses: list, num_images: int, task_type: str = DEFAULT_TASK):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        self._emit("job_start", job_id=job_id, num_images=num_images, helpers=helper_addresses)
-        self.log(f"Job {job_id}: generating {num_images} demo images")
-        images = task.make_demo_images(num_images)
+        task_mod = get_task(task_type)
+        self._emit(
+            "job_start", job_id=job_id, num_images=num_images, helpers=helper_addresses,
+            task_type=task_type, task_name=task_mod.DISPLAY_NAME,
+        )
+        self.log(f"Job {job_id}: generating {num_images} work item(s) for '{task_mod.DISPLAY_NAME}'")
+        items = task_mod.generate_work(num_images)
 
         reachable = self._probe_helpers(helper_addresses)
         if helper_addresses and not reachable:
@@ -89,62 +93,95 @@ class Orchestrator:
 
         share_desc = ", ".join(f"{name}={c}" for name, c in counts.items() if c > 0)
         self.log(f"Job {job_id}: split -> {share_desc}")
+        self._emit("split", job_id=job_id, counts={k: v for k, v in counts.items() if v > 0})
 
         results = [None] * num_images
         device_counts = {name: 0 for name in counts}
+        device_elapsed = {name: 0.0 for name in counts}
+        compression_ratios = []
+        job_start_mono = time.monotonic()
         pool = ThreadPoolExecutor(max_workers=max(1, len(assignments)))
         pending = []
 
         for target, indices in assignments.items():
             if not indices:
                 continue
-            fut = pool.submit(self._process_chunk, job_id, target, indices, images)
+            fut = pool.submit(self._process_chunk, job_id, target, indices, items, task_type)
             pending.append((target, indices, fut))
 
         # Resolve futures, handling fallback for any helper chunk that fails.
         fallback_futs = []
         for target, indices, fut in pending:
             try:
-                chunk_results, elapsed = fut.result()
-                for idx, img in zip(indices, chunk_results):
-                    results[idx] = img
+                chunk_results, elapsed, compression = fut.result()
+                for idx, item in zip(indices, chunk_results):
+                    results[idx] = item
                 device_counts[target] = device_counts.get(target, 0) + len(indices)
+                device_elapsed[target] = device_elapsed.get(target, 0.0) + elapsed
+                if compression:
+                    compression_ratios.append(compression["response_ratio"])
+                comp_note = f", compressed to {compression['response_ratio']*100:.0f}% of original" if compression else ""
                 self.log(
-                    f"Job {job_id}: {target} finished {len(indices)} image(s) in {elapsed:.2f}s"
+                    f"Job {job_id}: {target} finished {len(indices)} item(s) in {elapsed:.2f}s{comp_note}"
+                )
+                self._emit(
+                    "chunk_done", job_id=job_id, target=target, count=len(indices), elapsed=elapsed, compression=compression
                 )
             except net_client.HelperError as exc:
                 self.log(
                     f"Job {job_id}: helper {target} dropped mid-job ({exc}) — "
-                    f"reassigning its {len(indices)} image(s) to local",
+                    f"reassigning its {len(indices)} item(s) to local",
                     level="warn",
                 )
-                fb_fut = pool.submit(self._process_chunk, job_id, "local", indices, images)
+                self._emit("chunk_failed", job_id=job_id, target=target, count=len(indices), reason=str(exc))
+                fb_fut = pool.submit(self._process_chunk, job_id, "local", indices, items, task_type)
                 fallback_futs.append(("local", indices, fb_fut))
 
         for target, indices, fut in fallback_futs:
             try:
-                chunk_results, elapsed = fut.result()
-                for idx, img in zip(indices, chunk_results):
-                    results[idx] = img
+                chunk_results, elapsed, _compression = fut.result()
+                for idx, item in zip(indices, chunk_results):
+                    results[idx] = item
                 device_counts[target] = device_counts.get(target, 0) + len(indices)
-                self.log(f"Job {job_id}: local fallback finished {len(indices)} image(s) in {elapsed:.2f}s")
+                device_elapsed[target] = device_elapsed.get(target, 0.0) + elapsed
+                self.log(f"Job {job_id}: local fallback finished {len(indices)} item(s) in {elapsed:.2f}s")
+                self._emit(
+                    "chunk_done", job_id=job_id, target=target, count=len(indices), elapsed=elapsed, fallback=True
+                )
             except Exception as exc:
-                # Local processing must never fail for a demo image batch;
-                # if it somehow does, surface it loudly rather than silently
-                # dropping images from the output.
-                self.log(f"Job {job_id}: local fallback FAILED for {len(indices)} image(s): {exc}", level="error")
+                # Local processing must never fail for a demo batch; if it
+                # somehow does, surface it loudly rather than silently
+                # dropping items from the output.
+                self.log(f"Job {job_id}: local fallback FAILED for {len(indices)} item(s): {exc}", level="error")
 
         pool.shutdown(wait=True)
+        job_wall_seconds = time.monotonic() - job_start_mono
 
         missing = [i for i, r in enumerate(results) if r is None]
         if missing:
             self.log(
-                f"Job {job_id}: {len(missing)} image(s) could not be processed by any device", level="error"
+                f"Job {job_id}: {len(missing)} item(s) could not be processed by any device", level="error"
             )
 
-        saved = self._save_outputs(job_id, results)
+        saved = self._save_outputs(job_id, results, task_mod)
         breakdown = ", ".join(f"{name}: {c}" for name, c in device_counts.items() if c > 0)
-        self.log(f"Job {job_id}: complete — {saved} image(s) saved to {OUTPUT_DIR}/ ({breakdown})")
+        self.log(f"Job {job_id}: complete — {saved} item(s) saved to {OUTPUT_DIR}/ ({breakdown})")
+
+        # Session summary: estimate what fully-local processing would have
+        # cost, using the local device's own measured per-item rate this run.
+        local_count = device_counts.get("local", 0)
+        estimated_local_seconds = None
+        time_saved_seconds = None
+        if local_count > 0:
+            local_rate = device_elapsed.get("local", 0.0) / local_count
+            estimated_local_seconds = round(local_rate * num_images, 2)
+            time_saved_seconds = round(max(0.0, estimated_local_seconds - job_wall_seconds), 2)
+            if time_saved_seconds > 0:
+                self.log(
+                    f"Job {job_id}: took {job_wall_seconds:.2f}s vs an estimated {estimated_local_seconds:.2f}s "
+                    f"fully local — saved ~{time_saved_seconds:.2f}s"
+                )
+
         self._emit(
             "done",
             job_id=job_id,
@@ -152,6 +189,11 @@ class Orchestrator:
             saved=saved,
             missing=len(missing),
             breakdown=device_counts,
+            device_elapsed={k: round(v, 2) for k, v in device_elapsed.items()},
+            job_wall_seconds=round(job_wall_seconds, 2),
+            estimated_local_seconds=estimated_local_seconds,
+            time_saved_seconds=time_saved_seconds,
+            avg_compression_ratio=round(sum(compression_ratios) / len(compression_ratios), 4) if compression_ratios else None,
         )
 
     def _probe_helpers(self, helper_addresses: list) -> list:
@@ -163,7 +205,7 @@ class Orchestrator:
             self.monitor.add_helper(addr)
             rec = self.monitor.get(addr)
             try:
-                data = net_client.fetch_stats(addr)
+                data = net_client.fetch_stats(addr, passphrase=self.monitor.passphrase)
                 rec.record_success(
                     cpu_percent=data["cpu_percent"],
                     ram_percent=data["ram_percent"],
@@ -174,6 +216,8 @@ class Orchestrator:
                 snap = rec.snapshot()
                 if snap["status"] in ("idle", "reconnecting") and snap["spare_score"] > 0:
                     reachable.append((addr, snap["spare_score"]))
+                elif snap["status"] == "paused":
+                    self.log(f"Helper {addr} is paused by its operator — not sending it work", level="warn")
                 else:
                     self.log(f"Helper {addr} reachable but reports no spare capacity right now", level="warn")
             except net_client.HelperError as exc:
@@ -222,31 +266,32 @@ class Orchestrator:
             cursor += c
         return assignments
 
-    def _process_chunk(self, job_id: str, target: str, indices: list, images: list):
-        chunk = [images[i] for i in indices]
+    def _process_chunk(self, job_id: str, target: str, indices: list, items: list, task_type: str):
+        chunk = [items[i] for i in indices]
         start = time.monotonic()
         if target == "local":
             self.monitor.local.set_manual_busy(True)
             try:
-                result = task.process_batch(chunk)
+                result = get_task(task_type).process_batch(chunk)
             finally:
                 self.monitor.local.set_manual_busy(False)
-            return result["images"], time.monotonic() - start
+            return result["items"], time.monotonic() - start, None
         else:
-            data = net_client.send_process_chunk(target, job_id, f"{indices[0]}-{indices[-1]}", chunk)
-            return data["images"], time.monotonic() - start
+            data = net_client.send_process_chunk(
+                target, job_id, f"{indices[0]}-{indices[-1]}", chunk, task_type, passphrase=self.monitor.passphrase
+            )
+            return data["items"], time.monotonic() - start, data.get("_compression")
 
     @staticmethod
-    def _save_outputs(job_id: str, results: list) -> int:
+    def _save_outputs(job_id: str, results: list, task_mod) -> int:
         saved = 0
         job_dir = os.path.join(OUTPUT_DIR, job_id)
         os.makedirs(job_dir, exist_ok=True)
-        for idx, img_b64 in enumerate(results):
-            if img_b64 is None:
+        for idx, item in enumerate(results):
+            if item is None:
                 continue
             try:
-                img = task.decode_image(img_b64)
-                img.save(os.path.join(job_dir, f"image_{idx:03d}.png"))
+                task_mod.save_result(item, os.path.join(job_dir, f"item_{idx:03d}"))
                 saved += 1
             except Exception:
                 continue

@@ -23,6 +23,11 @@
     <section class="control-panel">
       <div class="control-row">
         <div class="field">
+          <label for="task-type">Task</label>
+          <select id="task-type"></select>
+        </div>
+
+        <div class="field">
           <label for="num-images">Batch size</label>
           <input type="number" id="num-images" value="24" min="1" max="200">
         </div>
@@ -38,10 +43,18 @@
           <button id="add-helper" class="btn-ghost" type="button">+ Add helper</button>
         </div>
 
+        <div class="field">
+          <label for="passphrase">Shared passphrase</label>
+          <input type="password" id="passphrase" placeholder="optional">
+        </div>
+
         <button id="start-btn" class="btn-primary" type="button">Start</button>
       </div>
       <p class="hint" id="hint-text">
-        Enter each helper's address as <code>host:port</code>. Leave the list empty to run fully local.
+        Enter each helper's address as <code>host:port</code> (LAN/USB-C), or
+        <code>relay://relay-host:port/room/device-id</code> for a device on a different
+        network via a relay server you've deployed (see README). Leave the list empty to
+        run fully local. If a helper requires a passphrase, enter the same one here.
       </p>
 
       <div class="iface-panel">
@@ -70,6 +83,26 @@
         <span class="summary-label">Result</span>
         <span class="summary-value" id="summary-result">&mdash;</span>
       </div>
+      <div class="summary-item">
+        <span class="summary-label">Vs. fully local</span>
+        <span class="summary-value" id="summary-saved">&mdash;</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">Compression</span>
+        <span class="summary-value" id="summary-compression">&mdash;</span>
+      </div>
+    </section>
+
+    <section class="split-panel">
+      <div class="split-panel-header">
+        <span class="split-panel-title">Who's doing the work</span>
+        <span class="split-panel-total" id="split-total"></span>
+      </div>
+      <div id="split-body">
+        <p class="split-empty" id="split-empty">Start a run to see the local-vs-helper split here.</p>
+        <div class="split-bar" id="split-bar" hidden></div>
+        <div class="split-legend" id="split-legend"></div>
+      </div>
     </section>
 
     <main class="main-grid">
@@ -77,12 +110,19 @@
       <section class="log-panel">
         <div class="log-header">
           <span>Activity Log</span>
+          <div class="log-filters" id="log-filters">
+            <button class="log-filter-chip active" data-level="all" type="button">All</button>
+            <button class="log-filter-chip" data-level="info" type="button">Info</button>
+            <button class="log-filter-chip" data-level="warn" type="button">Warn</button>
+            <button class="log-filter-chip" data-level="error" type="button">Error</button>
+          </div>
         </div>
         <div class="log-body" id="log-body"></div>
       </section>
     </main>
   </div>
 
+  <script src="{{ url_for('static', filename='sparkline.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

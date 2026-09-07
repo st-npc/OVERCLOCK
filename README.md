@@ -33,6 +33,18 @@ Open `http://localhost:5050`, add each helper's `host:port` under
 connects to the helpers and kicks off the run in one action. Leave the
 helper list empty to run fully local.
 
+Each helper also serves its own page at `http://<its-address>:<port>/` —
+the **Receiver** view. Open it on the helper machine itself to see that
+device's own live stats and a **Pause Receiving** / **Start Receiving**
+toggle. Pausing doesn't stop the process — it just tells the orchestrator's
+next job "don't send me work"; anything already in flight still finishes.
+A paused helper shows up on the main dashboard as `PAUSED`, is excluded
+from the split, and the log says so explicitly.
+
+The main dashboard also has a **"Who's doing the work"** panel: a live bar
+showing exactly what fraction of the current batch went to the local
+device versus each helper, filling in per-device as chunks complete.
+
 ### Simulating multiple devices on one machine
 
 ```bash
@@ -58,14 +70,43 @@ every image accounted for.
 
 | File | Responsibility |
 |---|---|
-| `task.py` | The demo workload itself (image batch transform). No networking/Flask imports — swap this file to change the demo task. |
+| `tasks/` | Pluggable demo workloads — see below. No networking/Flask imports in any task module. |
 | `net_client.py` | All outbound HTTP to helpers: timeouts, response validation, typed errors (`HelperUnreachable`, `HelperBadResponse`). |
 | `device_monitor.py` | Local + helper stats polling, rolling ~60s history for sparklines, status state machine (`idle`/`busy`/`unreachable`/`reconnecting`), spare-capacity scoring. |
 | `orchestrator.py` | Job lifecycle: reachability probe → proportional split → concurrent dispatch → per-chunk fallback on failure → ordered merge → `processed_output/`. |
 | `interfaces.py` | Best-effort local network interface detection (used to surface a USB-C link in the dashboard). |
-| `app_helper.py` | Helper Flask service: `GET /stats`, `POST /process`. |
+| `wire.py` | zlib+JSON payload compression shared by every transport. |
+| `relay_client.py` / `relay_server.py` | Cross-network relay tunnel — see below. `relay_server.py` is standalone and self-hostable. |
+| `app_helper.py` | Helper Flask service: `GET /stats`, `POST /process`, optional relay-polling thread. |
 | `app_main.py` | Orchestrator Flask service: dashboard, `POST /api/start`, `GET /api/events` (SSE), `GET /api/status`, `GET /api/interfaces`. |
 | `templates/`, `static/` | Dashboard UI. Hand-rolled canvas sparklines, no CDN dependency — works fully offline on a bare LAN. |
+
+## Pluggable tasks (not limited to images)
+
+Sharing isn't tied to image processing — `tasks/` is a small plugin
+system. Every task module implements the same four-function contract
+(documented in `tasks/__init__.py`): `DISPLAY_NAME`, `generate_work(n)`,
+`process_batch(items)`, `save_result(item, out_path_base)`. A work item is
+just an opaque string (base64, JSON, whatever the task needs) — nothing
+in the networking, orchestration, or dashboard layers knows or cares what
+it actually contains.
+
+Two tasks ship today, selectable from the **Task** dropdown on the
+dashboard (also settable via `POST /api/start`'s `task_type` field, and
+listed at `GET /api/tasks`):
+
+- **`image`** — the original demo: a Pillow blur/edge-detect filter chain.
+- **`render`** — Mandelbrot-set tile rendering. Genuinely CPU-heavy (pure
+  per-pixel escape-time computation, no vectorization), and each work
+  item is a JSON description of a viewport strip, *not* an image — proof
+  the split/dispatch/fallback machinery never assumed images in the first
+  place. This is the "rendering" workload: a real, splittable,
+  resource-heavy job in the same spirit as compiling or video rendering.
+
+**Adding another task** (a compile job, an ML batch, etc.) means writing
+one new file under `tasks/` with those four pieces and adding one line to
+`TASKS` in `tasks/__init__.py` — nothing in `app_main.py`, `app_helper.py`,
+`orchestrator.py`, or the dashboard needs to change.
 
 ## Real multi-machine testing (Wi-Fi/LAN)
 
@@ -193,7 +234,104 @@ flagged `likely_usb: True` if its name matches `usb`/`rndis`/`ncm`/`ecm`
 still be listed, just without the badge; use its IP either way). Then use
 that IP as the helper's address on the other device's dashboard.
 
+## Security: shared-passphrase auth
+
+By default the network is open — anyone who can reach a helper's port can
+send it work. To lock it down, start a helper with `--passphrase`:
+
+```bash
+python app_helper.py --port 5001 --passphrase hunter2
+```
+
+and enter the same passphrase in the dashboard's **Shared passphrase**
+field before clicking Start — it's sent with every job to every helper (one
+shared secret for the whole mesh, not per-helper credentials). A helper
+missing/wrong passphrase returns 401 and is treated exactly like an
+unreachable helper: the log says so and that chunk falls back to local.
+`/stats` itself stays unauthenticated (read-only telemetry, and the
+Receiver page's own UI depends on it working without a header) — only
+`/process`, the endpoint that actually consumes CPU/RAM, is gated.
+
+This is a shared-secret check, not encryption — traffic is still plain
+HTTP. Good enough to keep casual/accidental use off your LAN; not a
+substitute for a VPN if you're on a network you don't trust at all.
+
+## Compression
+
+Every `/process` request and response is zlib-compressed on the wire
+(`wire.py`), with a fallback to plain JSON if a peer ever sends
+uncompressed (so a raw `curl` against a helper still works during
+debugging). The dashboard's **Compression** stat is the real measured
+ratio for the run, not an estimate — the render task's JSON work
+descriptions compress especially well; image payloads still shrink
+meaningfully since compressing the outer request/response envelope
+recovers some of base64's overhead.
+
+## Session summary
+
+Every completed run reports, in the summary strip: total wall time, an
+estimate of how long fully-local processing would have taken (from the
+local device's own measured per-item rate this run), and the resulting
+time saved. The "Who's doing the work" panel's legend gets a per-device
+throughput figure (img/s) once each device finishes. If a run ends up
+fully local (no helpers, or all unreachable), the estimate naturally
+converges to the actual time and shows "no faster."
+
+## Cross-network relay (Priority 3 — needs infrastructure you host)
+
+Direct connections need both devices reachable from each other (same
+LAN/USB link). For two devices on **different networks** — different
+Wi-Fi, different NAT — Overclock can tunnel through a relay server both
+sides can reach instead, the same shape as a TURN relay for video calls.
+
+**I cannot host this for you.** `relay_server.py` is a small, dependency-free,
+standalone Flask app — deploy it yourself somewhere both devices can reach:
+a $5 VPS, a free tier on Render/Fly/Railway, or even a third machine on a
+network both devices can reach. Nothing else in this repo needs to go
+with it; it's one file.
+
+```bash
+# on the relay host, port open to both devices:
+python relay_server.py --port 5090
+```
+
+On the device that will lend capacity, start its helper in relay mode
+instead of (or alongside) direct listening:
+
+```bash
+python app_helper.py --port 5001 --relay http://your-relay-host:5090 --room demo123 --device-id laptop-b
+```
+
+`--room` is any shared code you make up — both devices just need to agree
+on it (treat it like a meeting code, not a secret; combine with
+`--passphrase` if you want the traffic itself authenticated). On the
+**main** device's dashboard, add this as the helper address instead of a
+`host:port`:
+
+```
+relay://your-relay-host:5090/demo123/laptop-b
+```
+
+Everything else — the split, the fallback guarantee, compression, auth —
+behaves identically over a relay connection; `net_client.py` only branches
+on transport, orchestrator and the dashboard don't know the difference.
+Verified locally (relay, both a direct-mode and relay-mode helper, and the
+main device all running loopback, including killing a relay-connected
+helper mid-job and confirming fallback still completes correctly and
+detects the drop in a few seconds, not tens of seconds) — **but not across
+two genuinely different networks**, which needs your own relay deployment
+and two real internet connections to test honestly. What to check: after
+deploying, run the two commands above with your relay's real address, and
+confirm `curl http://your-relay-host:5090/relay/demo123/devices` lists
+your helper's device-id before you try it from the dashboard.
+
 ## What's solid vs. stubbed
 
-See the final status summary from the build session for the current,
-honest breakdown of what's demo-ready versus future scope.
+Everything in this README has been built and tested — including every
+Priority 3 item (task picker, passphrase auth, compression, session
+summary, cross-network relay). The one thing genuinely outside what I can
+verify myself: the relay tunnel is proven correct end-to-end on loopback,
+but real cross-network behavior (actual latency, NAT behavior, a relay
+host you've actually deployed) needs your own testing per the steps
+above. Likewise, real multi-machine Wi-Fi/LAN and any USB-C link still
+need your hardware, as noted in their sections above.

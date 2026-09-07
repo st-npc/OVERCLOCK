@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Overclock Receiver</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">&#9211;</span>
+        <span class="brand-name">OVERCLOCK</span>
+        <span class="brand-sub">receiver</span>
+      </div>
+    </header>
+
+    <section class="receiver-hero">
+      <div class="receiver-status-line" id="receiver-status-line">
+        <span class="dot"></span>
+        <span id="receiver-status-text">Loading...</span>
+      </div>
+      <button id="receiver-toggle" class="btn-receiver" type="button">&hellip;</button>
+      <p class="receiver-hint">
+        While receiving, this device answers work sent by other Overclock devices on the
+        network and shows up as a helper on their dashboard. Pause any time &mdash; a paused
+        device is skipped for new work (any job already in flight still finishes).
+      </p>
+      <div class="receiver-address">This device is reachable at <b id="receiver-address">&mdash;</b></div>
+    </section>
+
+    <main class="receiver-grid">
+      <section class="devices" id="devices"></section>
+
+      <section class="log-panel">
+        <div class="log-header">
+          <span>Incoming Activity</span>
+        </div>
+        <div class="log-body" id="activity-body">
+          <p class="activity-empty">No work received yet.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='sparkline.js') }}"></script>
+  <script src="{{ url_for('static', filename='receiver.js') }}"></script>
+</body>
+</html>
