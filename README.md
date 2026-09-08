@@ -82,8 +82,11 @@ times and it cracks a little more each time (right on top of the playing
 video), then shatters — the fragments fly apart with basic gravity,
 freeze-framed mid-video — revealing the real dashboard underneath. There's
 a low-key **Skip** link if you'd rather not. It only plays once per
-browser (a `localStorage` flag remembers you've seen it); clear that key
-or open a private window to replay it. It's fully self-contained, gated
+browser (a `localStorage` flag remembers you've seen it) — click the
+&#8635; button next to the run status in the top bar any time to force it
+to play again (it reloads the page with `?intro=1`, which the intro reads
+once and then strips from the URL so a plain refresh afterward goes back
+to skipping normally). It's fully self-contained, gated
 behind `prefers-reduced-motion` (skips straight to the dashboard if that's
 set), and tears down its own render loop, pauses/unloads the video, and
 frees its GPU resources the moment it's dismissed — it doesn't linger and

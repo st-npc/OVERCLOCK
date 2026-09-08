@@ -24,6 +24,7 @@
   }
 
   const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const forceReplay = new URLSearchParams(window.location.search).get("intro") === "1";
   let alreadySeen = false;
   try {
     alreadySeen = localStorage.getItem(SEEN_KEY) === "1";
@@ -31,9 +32,17 @@
     alreadySeen = false;
   }
 
-  if (alreadySeen || prefersReducedMotion) {
+  if ((alreadySeen && !forceReplay) || prefersReducedMotion) {
     dismissInstant();
     return;
+  }
+
+  if (forceReplay) {
+    // Drop the query param so a plain refresh afterward goes back to the
+    // normal one-time-per-browser behavior instead of replaying forever.
+    const url = new URL(window.location.href);
+    url.searchParams.delete("intro");
+    window.history.replaceState({}, "", url);
   }
 
   function markSeen() {

@@ -592,4 +592,13 @@
   }
 
   init();
+
+  const replayIntroBtn = document.getElementById("replay-intro");
+  if (replayIntroBtn) {
+    replayIntroBtn.addEventListener("click", () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("intro", "1");
+      window.location.href = url.toString();
+    });
+  }
 })();
