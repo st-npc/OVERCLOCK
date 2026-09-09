@@ -3,7 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Overclock Receiver — this device's live stats and pause/resume control for incoming shared work.">
+  <meta name="theme-color" content="#0a0c17" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2312172b'/%3E%3Ccircle%20cx='32'%20cy='34'%20r='18'%20fill='none'%20stroke='%236d5bf6'%20stroke-width='6'/%3E%3Cline%20x1='32'%20y1='10'%20x2='32'%20y2='28'%20stroke='%230fb896'%20stroke-width='6'%20stroke-linecap='round'/%3E%3C/svg%3E">
   <title>Overclock Receiver</title>
+  <script src="{{ url_for('static', filename='theme-init.js') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -14,14 +20,20 @@
         <span class="brand-name">OVERCLOCK</span>
         <span class="brand-sub">receiver</span>
       </div>
+      <div class="topbar-right">
+        <button id="theme-toggle" class="btn-icon theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" type="button">
+          <span class="icon-sun" aria-hidden="true">&#9728;</span>
+          <span class="icon-moon" aria-hidden="true">&#9789;</span>
+        </button>
+      </div>
     </header>
 
     <section class="receiver-hero">
-      <div class="receiver-status-line" id="receiver-status-line">
+      <div class="receiver-status-line" id="receiver-status-line" role="status" aria-live="polite">
         <span class="dot"></span>
         <span id="receiver-status-text">Loading...</span>
       </div>
-      <button id="receiver-toggle" class="btn-receiver" type="button">&hellip;</button>
+      <button id="receiver-toggle" class="btn-receiver" type="button" disabled>&hellip;</button>
       <p class="receiver-hint">
         While receiving, this device answers work sent by other Overclock devices on the
         network and shows up as a helper on their dashboard. Pause any time &mdash; a paused
@@ -37,7 +49,7 @@
         <div class="log-header">
           <span>Incoming Activity</span>
         </div>
-        <div class="log-body" id="activity-body">
+        <div class="log-body" id="activity-body" role="log" aria-live="polite" aria-relevant="additions">
           <p class="activity-empty">No work received yet.</p>
         </div>
       </section>
@@ -45,6 +57,8 @@
   </div>
 
   <script src="{{ url_for('static', filename='sparkline.js') }}"></script>
+  <script src="{{ url_for('static', filename='toast.js') }}"></script>
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
   <script src="{{ url_for('static', filename='receiver.js') }}"></script>
 </body>
 </html>

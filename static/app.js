@@ -25,6 +25,12 @@
   const splitBarEl = document.getElementById("split-bar");
   const splitLegendEl = document.getElementById("split-legend");
   const splitTotalEl = document.getElementById("split-total");
+  const adminLockBtn = document.getElementById("admin-lock");
+  const adminModal = document.getElementById("admin-modal");
+  const adminModalInput = document.getElementById("admin-modal-input");
+  const adminModalError = document.getElementById("admin-modal-error");
+  const adminModalSubmit = document.getElementById("admin-modal-submit");
+  const adminModalCancel = document.getElementById("admin-modal-cancel");
 
   const MAX_LOG_LINES = 400;
   const DEVICE_COLOR_COUNT = 6;
@@ -55,7 +61,7 @@
     const row = document.createElement("div");
     row.className = "helper-row";
     row.innerHTML = `
-      <input type="text" class="helper-input" placeholder="e.g. 192.168.1.42:5001" value="${escapeAttr(value)}">
+      <input type="text" class="helper-input" name="helper-address" aria-label="Helper device address" placeholder="e.g. 192.168.1.42:5001" value="${escapeAttr(value)}">
       <button class="btn-icon remove-helper" title="Remove this helper" type="button">&times;</button>
     `;
     row.querySelector(".remove-helper").addEventListener("click", () => row.remove());
@@ -72,12 +78,114 @@
       .filter(Boolean);
   }
 
+  const ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
   function escapeAttr(s) {
-    return String(s).replace(/"/g, "&quot;");
+    return String(s).replace(/[&<>"']/g, (c) => ESCAPE_MAP[c]);
   }
 
   function escapeHtml(s) {
-    return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    return String(s).replace(/[&<>"']/g, (c) => ESCAPE_MAP[c]);
+  }
+
+  // ---------------- admin token (optional dashboard lock) ----------------
+  // Mirrors the existing per-job "shared passphrase" pattern, but for who
+  // may drive this dashboard at all — see security.py / app_main.py's
+  // ADMIN_TOKEN. Off by default; only shown once /api/status reports the
+  // server actually has one configured.
+  const ADMIN_TOKEN_KEY = "overclock_admin_token";
+  let adminAuthRequired = false;
+
+  function getAdminToken() {
+    try {
+      return sessionStorage.getItem(ADMIN_TOKEN_KEY) || "";
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function setAdminToken(token) {
+    try {
+      if (token) sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+      else sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    } catch (_err) {
+      // sessionStorage unavailable — the token still works for this call,
+      // it just won't be remembered for the next one.
+    }
+  }
+
+  function adminHeaders() {
+    const token = getAdminToken();
+    return token ? { "X-Overclock-Admin-Token": token } : {};
+  }
+
+  function renderAdminLock() {
+    if (!adminLockBtn) return;
+    if (!adminAuthRequired) {
+      adminLockBtn.classList.remove("visible");
+      return;
+    }
+    adminLockBtn.classList.add("visible");
+    const unlocked = Boolean(getAdminToken());
+    adminLockBtn.classList.toggle("unlocked", unlocked);
+    adminLockBtn.textContent = unlocked ? "🔓 Unlocked" : "🔒 Locked";
+    adminLockBtn.title = unlocked
+      ? "This dashboard is unlocked for this tab session"
+      : "This dashboard is locked — click to enter the admin token";
+  }
+
+  function openAdminModal() {
+    if (!adminModal) return;
+    adminModalError.hidden = true;
+    adminModalInput.value = "";
+    adminModal.hidden = false;
+    adminModalInput.focus();
+  }
+
+  function closeAdminModal() {
+    if (adminModal) adminModal.hidden = true;
+  }
+
+  if (adminLockBtn) adminLockBtn.addEventListener("click", openAdminModal);
+  if (adminModalCancel) adminModalCancel.addEventListener("click", closeAdminModal);
+  if (adminModal) {
+    adminModal.addEventListener("click", (e) => {
+      if (e.target === adminModal) closeAdminModal();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && adminModal && !adminModal.hidden) closeAdminModal();
+  });
+  if (adminModalSubmit) {
+    adminModalSubmit.addEventListener("click", () => {
+      const value = adminModalInput.value.trim();
+      if (!value) {
+        adminModalError.hidden = false;
+        adminModalError.textContent = "Enter a token first.";
+        return;
+      }
+      setAdminToken(value);
+      renderAdminLock();
+      closeAdminModal();
+      showToast("Dashboard unlocked for this session.", "success");
+    });
+  }
+  if (adminModalInput) {
+    adminModalInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") adminModalSubmit.click();
+    });
+  }
+
+  // Returns true if the response was a 401 (missing/invalid admin token) —
+  // callers show the lock modal and stop, rather than treating it as a
+  // generic failure.
+  function handleAdminAuthResponse(resp, data) {
+    if (resp.status !== 401) return false;
+    setAdminToken("");
+    adminAuthRequired = true;
+    renderAdminLock();
+    showToast(data.error || "Admin token required or invalid.", "warn");
+    openAdminModal();
+    return true;
   }
 
   // ---------------- start flow ----------------
@@ -98,9 +206,10 @@
     const numImages = Math.max(1, Math.min(200, parseInt(numImagesInput.value, 10) || 24));
     const taskType = taskTypeSelect.value || "image";
     const passphrase = passphraseInput.value || null;
+    savePrefs();
 
     startBtn.disabled = true;
-    startBtn.textContent = "Running...";
+    startBtn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Starting...';
     clearLog();
     resetSplit();
     setRunStatus("running", "Starting...");
@@ -115,18 +224,30 @@
     try {
       const resp = await fetch("/api/start", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...adminHeaders() },
         body: JSON.stringify({ helpers, num_images: numImages, task_type: taskType, passphrase }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        appendLog({ level: "error", message: data.error || `Failed to start (HTTP ${resp.status})`, ts: Date.now() / 1000 });
+        if (handleAdminAuthResponse(resp, data)) {
+          resetStartButton();
+          setRunStatus("idle", "Idle");
+          stopElapsedTimer();
+          return;
+        }
+        const message = data.error || `Failed to start (HTTP ${resp.status})`;
+        appendLog({ level: "error", message, ts: Date.now() / 1000 });
+        showToast(message, resp.status === 429 ? "warn" : "error");
         resetStartButton();
         setRunStatus("error", "Failed to start");
         stopElapsedTimer();
+      } else {
+        startBtn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Running...';
       }
     } catch (err) {
-      appendLog({ level: "error", message: `Could not reach the orchestrator: ${err}`, ts: Date.now() / 1000 });
+      const message = `Could not reach the orchestrator: ${err}`;
+      appendLog({ level: "error", message, ts: Date.now() / 1000 });
+      showToast(message, "error");
       resetStartButton();
       setRunStatus("error", "Connection error");
       stopElapsedTimer();
@@ -136,6 +257,29 @@
   function resetStartButton() {
     startBtn.disabled = false;
     startBtn.textContent = "Start";
+  }
+
+  // ---------------- preferences (non-sensitive, quality-of-life only) ----
+  // The passphrase field is deliberately never persisted anywhere.
+  const PREFS_KEY = "overclock_prefs";
+  function savePrefs() {
+    try {
+      localStorage.setItem(
+        PREFS_KEY,
+        JSON.stringify({ num_images: numImagesInput.value, task_type: taskTypeSelect.value })
+      );
+    } catch (_err) {
+      // best-effort only
+    }
+  }
+  function loadPrefs() {
+    try {
+      const raw = localStorage.getItem(PREFS_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (_err) {
+      return null;
+    }
   }
 
   function setRunStatus(kind, text) {
@@ -279,8 +423,29 @@
   }
 
   // ---------------- device cards ----------------
+  function showDeviceSkeletons(count = 2) {
+    devicesEl.innerHTML = "";
+    for (let i = 0; i < count; i++) {
+      const el = document.createElement("article");
+      el.className = "device-card skeleton-card";
+      el.innerHTML = `
+        <div class="device-card-header">
+          <div class="skeleton skel-line w-40"></div>
+        </div>
+        <div class="metrics-row">
+          <div class="skeleton skel-block"></div>
+          <div class="skeleton skel-block"></div>
+          <div class="skeleton skel-block"></div>
+        </div>
+        <div class="skeleton skel-line w-60"></div>
+      `;
+      devicesEl.appendChild(el);
+    }
+  }
+
   function ensureCard(device) {
     if (cardEls.has(device.id)) return cardEls.get(device.id);
+    devicesEl.querySelectorAll(".skeleton-card").forEach((el) => el.remove());
 
     const color = colorForDevice(device.id);
     const root = document.createElement("article");
@@ -445,9 +610,14 @@
           summaryResult.textContent = `${evt.saved} saved`;
           summaryImages.textContent = `${evt.saved} / ${evt.saved + (evt.missing || 0)}`;
           setRunStatus("ok", "Complete");
+          runStatusEl.classList.remove("flash-ok");
+          void runStatusEl.offsetWidth; // restart the animation if it fires twice in a row
+          runStatusEl.classList.add("flash-ok");
+          showToast(`Job complete — ${evt.saved} item(s) processed.`, "success");
         } else {
           summaryResult.textContent = evt.error ? "error" : `${evt.missing || 0} missing`;
           setRunStatus(evt.error ? "error" : "warn", evt.error ? "Failed" : "Completed with issues");
+          showToast(evt.error || `${evt.missing || 0} item(s) could not be processed.`, evt.error ? "error" : "warn");
         }
 
         if (evt.time_saved_seconds != null && evt.estimated_local_seconds != null) {
@@ -490,13 +660,14 @@
       ifaceListEl.innerHTML = '<span class="iface-empty">No active network interfaces detected.</span>';
       return;
     }
+    const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
     ifaceListEl.innerHTML = ifaces
       .map((iface) => {
         const usbTag = iface.likely_usb ? '<span class="iface-usb-tag">USB link</span>' : "";
         return `
           <div class="iface-chip ${iface.likely_usb ? "usb" : ""}">
-            <span class="iface-name">${iface.name}</span>
-            <span>${iface.ip}:5000</span>
+            <span class="iface-name">${escapeHtml(iface.name)}</span>
+            <span>${escapeHtml(iface.ip)}:${port}</span>
             ${usbTag}
           </div>
         `;
@@ -547,7 +718,7 @@
       const isActive = stressToggleBtn.classList.contains("active");
       const resp = await fetch(isActive ? "/api/load/stop" : "/api/load/start", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...adminHeaders() },
         body: isActive
           ? undefined
           : JSON.stringify({
@@ -557,36 +728,53 @@
       });
       const status = await resp.json();
       if (!resp.ok) {
-        appendLog({ level: "error", message: status.error || "Could not change overload state", ts: Date.now() / 1000 });
+        if (!handleAdminAuthResponse(resp, status)) {
+          appendLog({ level: "error", message: status.error || "Could not change overload state", ts: Date.now() / 1000 });
+          showToast(status.error || "Could not change overload state.", resp.status === 429 ? "warn" : "error");
+        }
       } else {
         renderStressStatus(status);
       }
     } catch (err) {
       appendLog({ level: "error", message: `Could not reach the orchestrator: ${err}`, ts: Date.now() / 1000 });
+      showToast("Could not reach the orchestrator.", "error");
     } finally {
       stressToggleBtn.disabled = false;
     }
   });
 
   // ---------------- init ----------------
+  function showSkeletonsIfEmpty() {
+    if (cardEls.size === 0) showDeviceSkeletons(2);
+  }
+
   async function init() {
+    const prefs = loadPrefs();
+    if (prefs && prefs.num_images) numImagesInput.value = prefs.num_images;
+
+    showSkeletonsIfEmpty();
+
     try {
       const resp = await fetch("/api/status");
       const data = await resp.json();
+      adminAuthRequired = Boolean(data.admin_auth_required);
+      renderAdminLock();
       (data.devices || []).forEach(renderDevice);
       if (data.job_running) {
         startBtn.disabled = true;
-        startBtn.textContent = "Running...";
+        startBtn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Running...';
         setRunStatus("running", "Running...");
         summaryStrip.hidden = false;
         startElapsedTimer();
       }
     } catch (_err) {
       appendLog({ level: "warn", message: "Could not load initial status from the orchestrator.", ts: Date.now() / 1000 });
+      showToast("Could not load initial status from the orchestrator.", "error");
     }
     connectEvents();
     loadInterfaces();
-    loadTaskChoices();
+    await loadTaskChoices();
+    if (prefs && prefs.task_type) taskTypeSelect.value = prefs.task_type;
     loadStressStatus();
     setInterval(loadStressStatus, 4000);
   }

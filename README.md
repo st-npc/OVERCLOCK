@@ -173,11 +173,12 @@ every image accounted for.
 | `orchestrator.py` | Job lifecycle: reachability probe → proportional split → concurrent dispatch → per-chunk fallback on failure → ordered merge → `processed_output/`. |
 | `interfaces.py` | Best-effort local network interface detection (used to surface a USB-C link in the dashboard). |
 | `stress.py` | Demo-only local CPU/RAM load generator (see "Simulate local overload" below). Not used by the sharing pipeline. |
-| `wire.py` | zlib+JSON payload compression shared by every transport. |
+| `wire.py` | zlib+JSON payload compression shared by every transport, plus a decompression-bomb size guard. |
+| `security.py` | Shared hardening helpers used by every Flask service: per-IP rate limiter, security response headers. |
 | `relay_client.py` / `relay_server.py` | Cross-network relay tunnel — see below. `relay_server.py` is standalone and self-hostable. |
 | `app_helper.py` | Helper Flask service: `GET /stats`, `POST /process`, optional relay-polling thread. |
 | `app_main.py` | Orchestrator Flask service: dashboard, `POST /api/start`, `GET /api/events` (SSE), `GET /api/status`, `GET /api/interfaces`. |
-| `templates/`, `static/` | Dashboard UI. Hand-rolled canvas sparklines; three.js is vendored locally in `static/vendor/` (not a CDN) — works fully offline on a bare LAN. |
+| `templates/`, `static/` | Dashboard UI: dark/light theme (`static/theme.js` + `static/theme-init.js`), toast notifications (`static/toast.js`), canvas sparklines. three.js is vendored locally in `static/vendor/` (not a CDN) — works fully offline on a bare LAN. |
 | `static/intro.js` | One-time "break the screen" three.js intro gate — see below. Not on the sharing/job code path. |
 | `static/media/` | Vendored CC0 stock video used by the intro (see below). |
 | `static/bg.js` | Ambient background node-field animation (three.js). Purely decorative. |
@@ -338,10 +339,13 @@ that IP as the helper's address on the other device's dashboard.
 ## Security: shared-passphrase auth
 
 By default the network is open — anyone who can reach a helper's port can
-send it work. To lock it down, start a helper with `--passphrase`:
+send it work. To lock it down, start a helper with `--passphrase` (prefer
+the `OVERCLOCK_PASSPHRASE` env var instead — a CLI arg is visible to other
+local users via `ps`):
 
 ```bash
-python app_helper.py --port 5001 --passphrase hunter2
+OVERCLOCK_PASSPHRASE=hunter2 python app_helper.py --port 5001
+# or: python app_helper.py --port 5001 --passphrase hunter2
 ```
 
 and enter the same passphrase in the dashboard's **Shared passphrase**
@@ -356,6 +360,49 @@ Receiver page's own UI depends on it working without a header) — only
 This is a shared-secret check, not encryption — traffic is still plain
 HTTP. Good enough to keep casual/accidental use off your LAN; not a
 substitute for a VPN if you're on a network you don't trust at all.
+
+### Locking the dashboard itself
+
+The passphrase above gates *helpers* — by default, anyone who can reach the
+**main** dashboard can still start jobs on it or spin up the local overload
+simulator, since that dashboard has always been the thing you're sitting in
+front of. If you want to close that off too (e.g. the dashboard is
+reachable beyond the machine you trust), set an admin token:
+
+```bash
+OVERCLOCK_ADMIN_TOKEN=supersecret python app_main.py --port 5050
+# or: python app_main.py --port 5050 --admin-token supersecret
+```
+
+With a token set, `/api/start` and `/api/load/*` require it (as
+`X-Overclock-Admin-Token`); the dashboard shows a 🔒 **Locked** badge in the
+top bar and prompts for the token the first time you try to start a job
+(remembered for that browser tab's session only — closing the tab clears
+it). Unset by default, so the zero-config "open the dashboard, click Start"
+flow this project is built around is unchanged unless you opt in.
+
+### Other hardening
+
+Everything here is defense-in-depth for a tool meant to run on a LAN you
+mostly trust, not a claim that this is internet-hardened:
+
+- **Rate limiting** on every state-changing/expensive endpoint
+  (`/api/start`, `/api/load/*`, `/process`, `/api/toggle`, and the relay's
+  request/poll endpoints) — a per-IP sliding window (`security.py`), so a
+  runaway script can't hammer a device into uselessness.
+- **Security response headers** (CSP, `X-Frame-Options`, `X-Content-Type-Options`,
+  `Referrer-Policy`, a locked-down `Permissions-Policy`) on every response
+  from every Flask service here, including the standalone `relay_server.py`.
+- **Request size caps** (`MAX_CONTENT_LENGTH`) and a decompression-bomb
+  guard on `wire.py`'s zlib payloads, so an oversized or maliciously
+  compressible body can't exhaust memory before your own validation runs.
+- **Helper address validation** (`net_client.validate_helper_address`)
+  rejects malformed addresses, embedded credentials, and the cloud metadata
+  endpoint (`169.254.169.254`) before this app — which by design makes
+  outbound requests to whatever address you give it — ever connects to one.
+- **Input sanitization** on the free-form `job_id`/`chunk_id`/`task_type`
+  fields a `/process` caller supplies, before they're stored in a helper's
+  activity log or rendered anywhere.
 
 ## Compression
 

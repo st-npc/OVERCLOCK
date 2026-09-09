@@ -15,18 +15,21 @@ exactly as before with no UI involved — the Receiver page's button is a
 real pause/resume control on top of that default, not a gate you must
 unlock first.
 
-`--passphrase`, if set, is required (as an X-Overclock-Passphrase header)
-on /process only — /stats stays open since it's read-only telemetry the
-Receiver page's own UI depends on. `--relay` puts this helper in relay
-mode alongside its normal direct listening: a background thread polls a
-relay_server.py for requests tunneled from a device on a different
-network and replays them against this same Flask app, so /stats and
-/process behave identically either way.
+`--passphrase` (or the OVERCLOCK_PASSPHRASE env var — preferred, since a CLI
+arg is visible to other local users via `ps`), if set, is required (as an
+X-Overclock-Passphrase header) on /process only — /stats stays open since
+it's read-only telemetry the Receiver page's own UI depends on. `--relay`
+puts this helper in relay mode alongside its normal direct listening: a
+background thread polls a relay_server.py for requests tunneled from a
+device on a different network and replays them against this same Flask app,
+so /stats and /process behave identically either way.
 """
 import argparse
 import base64
-import hmac
+import datetime
 import json
+import os
+import re
 import threading
 import time
 from collections import deque
@@ -36,9 +39,48 @@ import requests
 from flask import Flask, Response, jsonify, render_template, request
 
 import wire
+from security import RateLimiter, apply_security_headers, constant_time_eq, rate_limited
 from tasks import DEFAULT_TASK, get_task, task_choices
 
 app = Flask(__name__)
+# /process legitimately carries a batch of images/render tiles (up to 500
+# items per chunk); other routes here only ever exchange small JSON. 64MB
+# comfortably covers a real chunk while still bounding memory from an
+# oversized/malicious body before a route body is even read.
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = datetime.timedelta(days=365)
+
+HELPER_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+    "form-action 'self'; frame-ancestors 'none'"
+)
+
+
+@app.after_request
+def _add_security_headers(resp):
+    return apply_security_headers(resp, csp=HELPER_CSP)
+
+
+_process_limiter = RateLimiter(max_requests=30, window_seconds=10)
+_toggle_limiter = RateLimiter(max_requests=10, window_seconds=10)
+_read_limiter = RateLimiter(max_requests=120, window_seconds=10)
+
+# job_id/chunk_id/task_type arrive in an authenticated-or-not /process body
+# and get echoed straight back into the response and this helper's own
+# Receiver page (via /api/activity). They're free-form strings from
+# whoever's driving a job against this helper, so cap their length and strip
+# anything that isn't printable before they're stored or rendered anywhere.
+_UNPRINTABLE_RE = re.compile(r"[\x00-\x1f\x7f]")
+_ACTIVITY_FIELD_MAX_LEN = 64
+
+
+def _clean_activity_field(value, max_len: int = _ACTIVITY_FIELD_MAX_LEN):
+    if not isinstance(value, str):
+        return None
+    cleaned = _UNPRINTABLE_RE.sub("", value).strip()
+    return cleaned[:max_len] if cleaned else None
+
 
 _busy_lock = threading.Lock()
 _busy = False
@@ -49,7 +91,7 @@ _accepting = True
 _activity_lock = threading.Lock()
 _activity = deque(maxlen=50)
 
-_passphrase = None  # set from --passphrase; None means /process is open to anyone
+_passphrase = os.environ.get("OVERCLOCK_PASSPHRASE") or None  # None means /process is open to anyone
 
 
 def _set_busy(value: bool):
@@ -94,7 +136,7 @@ def _auth_ok() -> bool:
     if not _passphrase:
         return True
     provided = request.headers.get("X-Overclock-Passphrase", "")
-    return hmac.compare_digest(provided, _passphrase)
+    return constant_time_eq(provided, _passphrase)
 
 
 @app.get("/")
@@ -103,6 +145,7 @@ def receiver_page():
 
 
 @app.get("/stats")
+@rate_limited(_read_limiter)
 def stats():
     vm = psutil.virtual_memory()
     return jsonify(
@@ -119,6 +162,7 @@ def stats():
 
 
 @app.get("/api/activity")
+@rate_limited(_read_limiter)
 def api_activity():
     with _activity_lock:
         items = list(_activity)
@@ -126,11 +170,13 @@ def api_activity():
 
 
 @app.get("/api/tasks")
+@rate_limited(_read_limiter)
 def api_tasks():
     return jsonify({"tasks": task_choices(), "default": DEFAULT_TASK})
 
 
 @app.post("/api/toggle")
+@rate_limited(_toggle_limiter)
 def api_toggle():
     global _accepting
     with _accepting_lock:
@@ -140,6 +186,7 @@ def api_toggle():
 
 
 @app.post("/process")
+@rate_limited(_process_limiter)
 def process():
     if not _auth_ok():
         return jsonify({"error": "invalid or missing passphrase"}), 401
@@ -170,21 +217,36 @@ def process():
         return jsonify({"error": "chunk too large"}), 413
 
     task_type = payload.get("task_type", DEFAULT_TASK)
+    if not isinstance(task_type, str):
+        return jsonify({"error": "'task_type' must be a string"}), 400
     task_mod = get_task(task_type)
+
+    # job_id/chunk_id are free-form strings supplied by whoever is driving
+    # this job (the orchestrator, ordinarily — but nothing stops a direct
+    # caller from sending anything). They're only ever used for display
+    # (this response, and the Receiver page's activity list), never for a
+    # file path or a lookup key, but they're sanitized and length-capped
+    # anyway so nothing oversized or full of control characters ends up
+    # stored or echoed back.
+    job_id = _clean_activity_field(payload.get("job_id"))
+    chunk_id = _clean_activity_field(payload.get("chunk_id"))
 
     _set_busy(True)
     try:
         result = task_mod.process_batch(items)
     except Exception as exc:
-        return jsonify({"error": f"processing failed: {exc}"}), 500
+        # The exception message can be useful during LAN-local debugging
+        # (that's this project's whole demo philosophy), but cap it so a
+        # pathological error can't blow up the response.
+        return jsonify({"error": f"processing failed: {str(exc)[:300]}"}), 500
     finally:
         _set_busy(False)
 
-    _record_activity(payload.get("job_id"), payload.get("chunk_id"), task_type, len(items), result["elapsed_seconds"])
+    _record_activity(job_id, chunk_id, _clean_activity_field(task_type) or task_type[:64], len(items), result["elapsed_seconds"])
 
     response_payload = {
-        "job_id": payload.get("job_id"),
-        "chunk_id": payload.get("chunk_id"),
+        "job_id": job_id,
+        "chunk_id": chunk_id,
         "items": result["items"],
         "elapsed_seconds": result["elapsed_seconds"],
     }
@@ -267,7 +329,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Overclock helper service")
     parser.add_argument("--port", type=int, default=5001)
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--passphrase", default=None, help="require this passphrase on /process")
+    parser.add_argument(
+        "--passphrase",
+        default=None,
+        help="require this passphrase on /process. Prefer the OVERCLOCK_PASSPHRASE env var instead — "
+        "a CLI arg is visible to other local users via `ps`.",
+    )
     parser.add_argument("--relay", default=None, help="relay_server.py base URL, e.g. http://relay.example.com:5090")
     parser.add_argument("--room", default="default", help="relay room code shared with the main device")
     parser.add_argument("--device-id", default=None, help="this device's id within the relay room (default: derived from port)")
@@ -275,7 +342,10 @@ if __name__ == "__main__":
 
     if args.passphrase:
         _passphrase = args.passphrase
+    if _passphrase:
         print("Passphrase required on /process")
+    else:
+        print("No passphrase set — any device that can reach /process can send this helper work.")
 
     if args.relay:
         device_id = args.device_id or f"helper-{args.port}"

@@ -3,7 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Overclock — peer-to-peer resource sharing for low-end devices. Offload work to nearby idle devices when this one's overloaded.">
+  <meta name="theme-color" content="#0a0c17" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2312172b'/%3E%3Ccircle%20cx='32'%20cy='34'%20r='18'%20fill='none'%20stroke='%236d5bf6'%20stroke-width='6'/%3E%3Cline%20x1='32'%20y1='10'%20x2='32'%20y2='28'%20stroke='%230fb896'%20stroke-width='6'%20stroke-linecap='round'/%3E%3C/svg%3E">
   <title>Overclock</title>
+  <script src="{{ url_for('static', filename='theme-init.js') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -27,8 +33,13 @@
         <span class="brand-sub">peer-to-peer resource sharing</span>
       </div>
       <div class="topbar-right">
-        <button id="replay-intro" class="btn-icon" title="Replay intro" type="button">&#8635;</button>
-        <div class="run-status" id="run-status">
+        <button id="admin-lock" class="admin-lock" type="button"></button>
+        <button id="theme-toggle" class="btn-icon theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" type="button">
+          <span class="icon-sun" aria-hidden="true">&#9728;</span>
+          <span class="icon-moon" aria-hidden="true">&#9789;</span>
+        </button>
+        <button id="replay-intro" class="btn-icon" title="Replay intro" aria-label="Replay intro animation" type="button">&#8635;</button>
+        <div class="run-status" id="run-status" role="status" aria-live="polite">
           <span class="run-status-dot" id="run-status-dot"></span>
           <span id="run-status-text">Idle</span>
         </div>
@@ -82,8 +93,8 @@
           <label>Helper devices</label>
           <div id="helper-list" class="helper-list">
             <div class="helper-row">
-              <input type="text" class="helper-input" placeholder="e.g. 192.168.1.42:5001">
-              <button class="btn-icon remove-helper" title="Remove this helper" type="button">&times;</button>
+              <input type="text" class="helper-input" name="helper-address" aria-label="Helper device address" placeholder="e.g. 192.168.1.42:5001">
+              <button class="btn-icon remove-helper" title="Remove this helper" aria-label="Remove this helper" type="button">&times;</button>
             </div>
           </div>
           <button id="add-helper" class="btn-ghost" type="button">+ Add helper</button>
@@ -106,7 +117,7 @@
       <div class="iface-panel">
         <div class="iface-panel-header">
           <span>This device is reachable at</span>
-          <button id="refresh-ifaces" class="btn-icon" title="Refresh" type="button">&#8635;</button>
+          <button id="refresh-ifaces" class="btn-icon" title="Refresh" aria-label="Refresh network interfaces" type="button">&#8635;</button>
         </div>
         <div id="iface-list" class="iface-list"></div>
       </div>
@@ -163,13 +174,29 @@
             <button class="log-filter-chip" data-level="error" type="button">Error</button>
           </div>
         </div>
-        <div class="log-body" id="log-body"></div>
+        <div class="log-body" id="log-body" role="log" aria-live="polite" aria-relevant="additions"></div>
       </section>
     </main>
   </div>
 
+  <div id="admin-modal" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="admin-modal-title">
+      <h2 id="admin-modal-title">Admin token required</h2>
+      <p>This dashboard's operator locked it. Enter the admin token to start jobs or control the overload simulator.</p>
+      <label for="admin-modal-input" class="sr-only">Admin token</label>
+      <input type="password" id="admin-modal-input" name="admin-token" placeholder="Admin token" autocomplete="off">
+      <p class="modal-error" id="admin-modal-error" hidden></p>
+      <div class="modal-actions">
+        <button id="admin-modal-cancel" class="btn-ghost" type="button">Cancel</button>
+        <button id="admin-modal-submit" class="btn-primary" type="button">Unlock</button>
+      </div>
+    </div>
+  </div>
+
   <script src="{{ url_for('static', filename='vendor/three.min.js') }}"></script>
   <script src="{{ url_for('static', filename='sparkline.js') }}"></script>
+  <script src="{{ url_for('static', filename='toast.js') }}"></script>
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
   <script src="{{ url_for('static', filename='bg.js') }}"></script>
   <script src="{{ url_for('static', filename='intro.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>

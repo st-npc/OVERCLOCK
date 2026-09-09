@@ -11,6 +11,7 @@ Two transports, same validation and same call signatures either way:
     reach, for devices on different networks. See relay_client.py.
 """
 import json
+from urllib.parse import urlparse
 
 import requests
 
@@ -25,6 +26,64 @@ RELAY_STATS_WAIT = 4.0    # a genuinely alive relay-connected helper is mid-poll
                            # anything much longer just delays detecting a dead one during the probe
 
 PASSPHRASE_HEADER = "X-Overclock-Passphrase"
+
+MAX_ADDRESS_LEN = 255
+
+# This app deliberately lets a user hand it an arbitrary "helper" address and
+# then makes an outbound HTTP request to it from the server process — that's
+# the whole point (offload work to another device you point it at). The
+# trade-off is a built-in SSRF primitive: anyone who can reach the dashboard
+# can make it issue requests to addresses of their choosing. We can't (and
+# shouldn't) block private/LAN ranges, since that's exactly where real
+# helpers live, including 169.254.x.x for the USB-C link-local case
+# documented in README.md. What we *can* block cheaply: the well-known cloud
+# metadata endpoint (a classic SSRF target with zero legitimate use as an
+# "Overclock helper"), and addresses smuggling credentials or control
+# characters into the host portion.
+_BLOCKED_HOSTS = {"169.254.169.254", "metadata.google.internal"}
+
+
+class InvalidHelperAddress(ValueError):
+    """Raised by validate_helper_address(); callers turn this into a 400
+    rather than ever attempting a network call with the address."""
+
+
+def validate_helper_address(address: str) -> str:
+    """Validate (without connecting) a helper address of either form:
+    `host:port` or `relay://relay-host:port/room/device_id`. Returns the
+    stripped address on success; raises InvalidHelperAddress with a
+    human-readable reason otherwise."""
+    addr = (address or "").strip()
+    if not addr:
+        raise InvalidHelperAddress("address is empty")
+    if len(addr) > MAX_ADDRESS_LEN:
+        raise InvalidHelperAddress("address is too long")
+    if any(ord(ch) < 0x20 for ch in addr):
+        raise InvalidHelperAddress("address contains control characters")
+
+    if is_relay_address(addr):
+        try:
+            relay_base, room, device_id = relay_client.parse_relay_address(addr)
+        except ValueError as exc:
+            raise InvalidHelperAddress(str(exc)) from exc
+        if not room or not device_id or len(room) > 128 or len(device_id) > 128:
+            raise InvalidHelperAddress("relay room/device id is empty or too long")
+        host = urlparse(relay_base).hostname
+        if not host:
+            raise InvalidHelperAddress("relay address is missing a host")
+        if host.lower() in _BLOCKED_HOSTS:
+            raise InvalidHelperAddress("that relay host is not allowed")
+        return addr
+
+    parsed = urlparse(_base_url(addr))
+    if parsed.username or parsed.password:
+        raise InvalidHelperAddress("credentials in the address are not allowed")
+    host = parsed.hostname
+    if not host:
+        raise InvalidHelperAddress("could not parse a host from the address")
+    if host.lower() in _BLOCKED_HOSTS:
+        raise InvalidHelperAddress("that address is not allowed")
+    return addr
 
 
 class HelperError(Exception):

@@ -105,6 +105,10 @@
     }
   }
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
   function timeStr(ts) {
     return new Date(ts * 1000).toLocaleTimeString([], { hour12: false });
   }
@@ -118,16 +122,21 @@
         activityBody.innerHTML = '<p class="activity-empty">No work received yet.</p>';
         return;
       }
+      // task_type/job_id/chunk_id are free-form strings supplied by
+      // whoever sent this device work — escape before rendering.
       activityBody.innerHTML = items
-        .map(
-          (item) => `
+        .map((item) => {
+          const task = escapeHtml(item.task_type || "?");
+          const jobId = escapeHtml(item.job_id || "?");
+          const chunkId = escapeHtml(item.chunk_id || "?");
+          return `
         <div class="activity-item">
           <span class="time">${timeStr(item.ts)}</span>
-          <span class="desc">${item.task_type || "?"} — job ${item.job_id || "?"} / chunk ${item.chunk_id || "?"} in ${item.elapsed_seconds}s</span>
+          <span class="desc">${task} — job ${jobId} / chunk ${chunkId} in ${item.elapsed_seconds}s</span>
           <span class="count">${item.count} img</span>
         </div>
-      `
-        )
+      `;
+        })
         .join("");
     } catch (_err) {
       // Keep showing the last known activity rather than clearing it on a blip.
@@ -139,10 +148,19 @@
     renderStatus();
     try {
       const resp = await fetch("/api/toggle", { method: "POST" });
-      const data = await resp.json();
-      accepting = !!data.accepting;
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        if (typeof showToast === "function") {
+          showToast(data.error || "Could not change receiving state.", resp.status === 429 ? "warn" : "error");
+        }
+      } else {
+        accepting = !!data.accepting;
+        if (typeof showToast === "function") {
+          showToast(accepting ? "Now receiving work." : "Paused — not accepting new work.", "info");
+        }
+      }
     } catch (_err) {
-      // leave state as-is; next poll will reconcile
+      if (typeof showToast === "function") showToast("Could not reach this device's own service.", "error");
     } finally {
       toggling = false;
       renderStatus();
