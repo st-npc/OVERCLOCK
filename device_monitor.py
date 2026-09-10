@@ -234,10 +234,6 @@ class DeviceMonitor:
         with self._devices_lock:
             self.devices.pop(address, None)
 
-    def helper_ids(self) -> list:
-        with self._devices_lock:
-            return [d for d, rec in self.devices.items() if rec.kind == "helper"]
-
     def get(self, device_id: str) -> DeviceRecord:
         with self._devices_lock:
             return self.devices.get(device_id)
@@ -304,15 +300,3 @@ class DeviceMonitor:
         # local device first, then helpers in registration order
         records.sort(key=lambda r: (r.kind != "local", r.id))
         return [r.snapshot() for r in records]
-
-    def reachable_helpers_with_score(self) -> list:
-        """Helpers currently believed usable for a new job, with their
-        latest spare_score. Excludes unreachable/connecting/busy helpers."""
-        result = []
-        with self._devices_lock:
-            helpers = [rec for rec in self.devices.values() if rec.kind == "helper"]
-        for rec in helpers:
-            snap = rec.snapshot()
-            if snap["status"] in (STATUS_IDLE, STATUS_RECONNECTING) and snap["spare_score"] > 0:
-                result.append((rec.id, snap["spare_score"]))
-        return result

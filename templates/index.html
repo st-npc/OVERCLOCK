@@ -167,11 +167,11 @@
       <section class="log-panel">
         <div class="log-header">
           <span>Activity Log</span>
-          <div class="log-filters" id="log-filters">
-            <button class="log-filter-chip active" data-level="all" type="button">All</button>
-            <button class="log-filter-chip" data-level="info" type="button">Info</button>
-            <button class="log-filter-chip" data-level="warn" type="button">Warn</button>
-            <button class="log-filter-chip" data-level="error" type="button">Error</button>
+          <div class="log-filters" id="log-filters" role="group" aria-label="Filter log by level">
+            <button class="log-filter-chip active" data-level="all" type="button" aria-pressed="true">All</button>
+            <button class="log-filter-chip" data-level="info" type="button" aria-pressed="false">Info</button>
+            <button class="log-filter-chip" data-level="warn" type="button" aria-pressed="false">Warn</button>
+            <button class="log-filter-chip" data-level="error" type="button" aria-pressed="false">Error</button>
           </div>
         </div>
         <div class="log-body" id="log-body" role="log" aria-live="polite" aria-relevant="additions"></div>
@@ -185,7 +185,7 @@
       <p>This dashboard's operator locked it. Enter the admin token to start jobs or control the overload simulator.</p>
       <label for="admin-modal-input" class="sr-only">Admin token</label>
       <input type="password" id="admin-modal-input" name="admin-token" placeholder="Admin token" autocomplete="off">
-      <p class="modal-error" id="admin-modal-error" hidden></p>
+      <p class="modal-error" id="admin-modal-error" role="alert" aria-live="assertive" hidden></p>
       <div class="modal-actions">
         <button id="admin-modal-cancel" class="btn-ghost" type="button">Cancel</button>
         <button id="admin-modal-submit" class="btn-primary" type="button">Unlock</button>

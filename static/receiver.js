@@ -7,6 +7,11 @@
   const addressEl = document.getElementById("receiver-address");
   const devicesEl = document.getElementById("devices");
   const activityBody = document.getElementById("activity-body");
+  const passphraseModal = document.getElementById("passphrase-modal");
+  const passphraseModalInput = document.getElementById("passphrase-modal-input");
+  const passphraseModalError = document.getElementById("passphrase-modal-error");
+  const passphraseModalSubmit = document.getElementById("passphrase-modal-submit");
+  const passphraseModalCancel = document.getElementById("passphrase-modal-cancel");
 
   const HISTORY_LEN = 60;
   const history = { cpu: [], ram: [], free_gb: [] };
@@ -143,14 +148,86 @@
     }
   }
 
-  toggleBtn.addEventListener("click", async () => {
+  // ---------------- passphrase (only needed if the operator set one) ----------------
+  // Mirrors the dashboard's own admin-token modal pattern (static/app.js) — a
+  // session-scoped credential entered once per tab, sent as a header on the
+  // one endpoint here that needs it. /stats reports auth_required so this
+  // page doesn't have to guess before the first toggle attempt.
+  const PASSPHRASE_KEY = "overclock_helper_passphrase";
+
+  function getPassphrase() {
+    try {
+      return sessionStorage.getItem(PASSPHRASE_KEY) || "";
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function setPassphrase(value) {
+    try {
+      if (value) sessionStorage.setItem(PASSPHRASE_KEY, value);
+      else sessionStorage.removeItem(PASSPHRASE_KEY);
+    } catch (_err) {
+      // sessionStorage unavailable — the value still works for this call.
+    }
+  }
+
+  function passphraseHeaders() {
+    const value = getPassphrase();
+    return value ? { "X-Overclock-Passphrase": value } : {};
+  }
+
+  function openPassphraseModal() {
+    if (!passphraseModal) return;
+    passphraseModalError.hidden = true;
+    passphraseModalInput.value = "";
+    passphraseModal.hidden = false;
+    passphraseModalInput.focus();
+  }
+
+  function closePassphraseModal() {
+    if (passphraseModal) passphraseModal.hidden = true;
+  }
+
+  if (passphraseModalCancel) passphraseModalCancel.addEventListener("click", closePassphraseModal);
+  if (passphraseModal) {
+    passphraseModal.addEventListener("click", (e) => {
+      if (e.target === passphraseModal) closePassphraseModal();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && passphraseModal && !passphraseModal.hidden) closePassphraseModal();
+  });
+  if (passphraseModalSubmit) {
+    passphraseModalSubmit.addEventListener("click", () => {
+      const value = passphraseModalInput.value.trim();
+      if (!value) {
+        passphraseModalError.hidden = false;
+        passphraseModalError.textContent = "Enter the passphrase first.";
+        return;
+      }
+      setPassphrase(value);
+      closePassphraseModal();
+      doToggle();
+    });
+  }
+  if (passphraseModalInput) {
+    passphraseModalInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") passphraseModalSubmit.click();
+    });
+  }
+
+  async function doToggle() {
     toggling = true;
     renderStatus();
     try {
-      const resp = await fetch("/api/toggle", { method: "POST" });
+      const resp = await fetch("/api/toggle", { method: "POST", headers: passphraseHeaders() });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        if (typeof showToast === "function") {
+        if (resp.status === 401) {
+          setPassphrase("");
+          openPassphraseModal();
+        } else if (typeof showToast === "function") {
           showToast(data.error || "Could not change receiving state.", resp.status === 429 ? "warn" : "error");
         }
       } else {
@@ -165,7 +242,9 @@
       toggling = false;
       renderStatus();
     }
-  });
+  }
+
+  toggleBtn.addEventListener("click", doToggle);
 
   pollStats();
   pollActivity();

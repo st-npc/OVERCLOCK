@@ -56,6 +56,20 @@
     </main>
   </div>
 
+  <div id="passphrase-modal" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="passphrase-modal-title">
+      <h2 id="passphrase-modal-title">Passphrase required</h2>
+      <p>This device's operator set a passphrase. Enter it to pause/resume receiving from this page.</p>
+      <label for="passphrase-modal-input" class="sr-only">Passphrase</label>
+      <input type="password" id="passphrase-modal-input" name="receiver-passphrase" placeholder="Passphrase" autocomplete="off">
+      <p class="modal-error" id="passphrase-modal-error" role="alert" aria-live="assertive" hidden></p>
+      <div class="modal-actions">
+        <button id="passphrase-modal-cancel" class="btn-ghost" type="button">Cancel</button>
+        <button id="passphrase-modal-submit" class="btn-primary" type="button">Continue</button>
+      </div>
+    </div>
+  </div>
+
   <script src="{{ url_for('static', filename='sparkline.js') }}"></script>
   <script src="{{ url_for('static', filename='toast.js') }}"></script>
   <script src="{{ url_for('static', filename='theme.js') }}"></script>

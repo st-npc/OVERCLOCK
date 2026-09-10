@@ -30,6 +30,7 @@ import datetime
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from collections import deque
@@ -39,7 +40,8 @@ import requests
 from flask import Flask, Response, jsonify, render_template, request
 
 import wire
-from security import RateLimiter, apply_security_headers, constant_time_eq, rate_limited
+from flask_common import install_error_handlers, install_security_headers
+from security import RateLimiter, constant_time_eq, rate_limited
 from tasks import DEFAULT_TASK, get_task, task_choices
 
 app = Flask(__name__)
@@ -50,6 +52,8 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = datetime.timedelta(days=365)
 
+RELAY_SECRET_HEADER = "X-Overclock-Relay-Secret"  # see relay_server.py's comment on the same name
+
 HELPER_CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
@@ -57,9 +61,7 @@ HELPER_CSP = (
 )
 
 
-@app.after_request
-def _add_security_headers(resp):
-    return apply_security_headers(resp, csp=HELPER_CSP)
+install_security_headers(app, csp=HELPER_CSP)
 
 
 _process_limiter = RateLimiter(max_requests=30, window_seconds=10)
@@ -178,6 +180,8 @@ def api_tasks():
 @app.post("/api/toggle")
 @rate_limited(_toggle_limiter)
 def api_toggle():
+    if not _auth_ok():
+        return jsonify({"error": "invalid or missing passphrase"}), 401
     global _accepting
     with _accepting_lock:
         _accepting = not _accepting
@@ -254,14 +258,7 @@ def process():
     return Response(compressed_out, mimetype="application/octet-stream", headers={wire.COMPRESSION_HEADER: wire.COMPRESSION_MARKER})
 
 
-@app.errorhandler(404)
-def not_found(_err):
-    return jsonify({"error": "not found"}), 404
-
-
-@app.errorhandler(500)
-def server_error(_err):
-    return jsonify({"error": "internal server error"}), 500
+install_error_handlers(app)
 
 
 # ---------------------------------------------------------------------
@@ -274,13 +271,25 @@ def _relay_loop(relay_base: str, room: str, device_id: str):
     poll_url = f"{relay_base}/relay/{room}/{device_id}/poll"
     print(f"Relay mode: polling {poll_url} as '{device_id}' in room '{room}'")
 
+    # Generated once per process and sent on every poll/respond so
+    # relay_server.py can tell this connection apart from anyone else who
+    # merely knows the (room, device_id) pair — see relay_server.py's
+    # RELAY_SECRET_HEADER comment for what this closes.
+    relay_secret = secrets.token_hex(16)
+    relay_headers = {RELAY_SECRET_HEADER: relay_secret}
+
     while True:
         try:
-            resp = requests.get(poll_url, params={"timeout": 25}, timeout=(5.0, 30.0))
+            resp = requests.get(poll_url, params={"timeout": 25}, headers=relay_headers, timeout=(5.0, 30.0))
         except requests.exceptions.RequestException:
             time.sleep(2.0)
             continue
 
+        if resp.status_code == 409:
+            print(f"Relay mode: device_id '{device_id}' in room '{room}' is already claimed by another "
+                  "connection — pick a different --device-id or --room. Retrying...")
+            time.sleep(2.0)
+            continue
         if resp.status_code != 200:
             time.sleep(2.0)
             continue
@@ -320,7 +329,12 @@ def _relay_loop(relay_base: str, room: str, device_id: str):
 
         if request_id:
             try:
-                requests.post(f"{relay_base}/relay/{room}/{device_id}/respond/{request_id}", json=out, timeout=(3.0, 10.0))
+                requests.post(
+                    f"{relay_base}/relay/{room}/{device_id}/respond/{request_id}",
+                    json=out,
+                    headers=relay_headers,
+                    timeout=(3.0, 10.0),
+                )
             except requests.exceptions.RequestException:
                 pass
 

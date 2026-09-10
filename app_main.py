@@ -14,9 +14,10 @@ from flask import Flask, Response, jsonify, render_template, request
 
 import net_client
 from device_monitor import DeviceMonitor
+from flask_common import install_error_handlers, install_security_headers
 from interfaces import list_network_interfaces
 from orchestrator import JobAlreadyRunningError, Orchestrator
-from security import RateLimiter, apply_security_headers, constant_time_eq, rate_limited
+from security import RateLimiter, constant_time_eq, rate_limited
 from stress import LoadGenerator
 from tasks import DEFAULT_TASK, TASKS, task_choices
 
@@ -65,9 +66,7 @@ DASHBOARD_CSP = (
 )
 
 
-@app.after_request
-def _add_security_headers(resp):
-    return apply_security_headers(resp, csp=DASHBOARD_CSP)
+install_security_headers(app, csp=DASHBOARD_CSP)
 
 
 def _admin_auth_ok() -> bool:
@@ -126,6 +125,7 @@ def index():
 
 
 @app.get("/api/status")
+@rate_limited(_read_limiter)
 def api_status():
     return jsonify(
         {
@@ -144,11 +144,13 @@ def api_interfaces():
 
 
 @app.get("/api/tasks")
+@rate_limited(_read_limiter)
 def api_tasks():
     return jsonify({"tasks": task_choices(), "default": DEFAULT_TASK})
 
 
 @app.get("/api/load")
+@rate_limited(_read_limiter)
 def api_load_status():
     return jsonify(load_generator.status())
 
@@ -286,14 +288,7 @@ def api_events():
     return resp
 
 
-@app.errorhandler(404)
-def not_found(_err):
-    return jsonify({"error": "not found"}), 404
-
-
-@app.errorhandler(500)
-def server_error(_err):
-    return jsonify({"error": "internal server error"}), 500
+install_error_handlers(app)
 
 
 if __name__ == "__main__":

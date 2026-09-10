@@ -24,16 +24,24 @@ Protocol (all JSON over HTTP, one room = one shared code both sides use):
       body_b64} — delivered=false means the device never answered in time
       (treated as unreachable by the caller).
   GET  /relay/<room>/<device_id>/poll?timeout=25
-      The device itself long-polls this to receive queued requests.
-      Returns {request: {...}} or {request: null} on timeout.
+      The device itself long-polls this to receive queued requests. Must
+      send an X-Overclock-Relay-Secret header (any random value the device
+      generates once and reuses); the first poller for a given
+      (room, device_id) binds it to that secret, and every later
+      poll/respond for that id must present the same one — otherwise
+      anyone who learns a device_id (e.g. via /devices below) could race
+      the real device for its queued requests. Returns {request: {...}} or
+      {request: null} on timeout, or 409 if the secret doesn't match.
   POST /relay/<room>/<device_id>/respond/<request_id>
       body: {status, headers, body_b64}
-      The device posts its answer back here.
+      Same X-Overclock-Relay-Secret requirement as /poll. The device posts
+      its answer back here.
   GET  /relay/<room>/devices
       Lists device_ids seen recently in that room (last 60s of poll
       activity) — informational, for a "who's connected" UI.
 """
 import argparse
+import hmac
 import queue
 import re
 import threading
@@ -67,9 +75,30 @@ _lock = threading.Lock()
 _inboxes = {}          # (room, device_id) -> queue.Queue of request envelopes
 _pending_results = {}   # request_id -> queue.Queue(maxsize=1)
 _last_seen = {}         # (room, device_id) -> monotonic timestamp
+_device_secrets = {}    # (room, device_id) -> secret bound to whoever is polling as it
 
 PRESENCE_WINDOW_SECONDS = 60
 MAX_WAIT_SECONDS = 90
+
+# A room code is a shared meeting-place, not a secret (see README's relay
+# section) — anyone who knows it can list device_ids via /devices below and
+# then poll for one. Without this, that's a full hijack: a second poller
+# racing the real device for /poll can win queued envelopes outright,
+# including the X-Overclock-Passphrase header and job payload inside them,
+# then forge a /respond with fabricated results. RELAY_SECRET_HEADER closes
+# that: whoever polls a (room, device_id) first binds it to their secret;
+# every later poll/respond for that id must present the same one. This
+# can't stop someone from claiming a device_id before its real owner ever
+# connects (inherent to a no-signup, shared-room design), but it stops
+# anyone else from racing an *already-connected* device for its traffic,
+# which is the actual mid-job hijack this app needs to prevent.
+RELAY_SECRET_HEADER = "X-Overclock-Relay-Secret"
+# A device's poll loop is essentially continuous (it re-polls immediately
+# after each one returns), so the gap between polls is normally near zero.
+# This grace window is long enough to survive that gap and a helper restart
+# after a brief relay/network hiccup, but short enough that a genuinely
+# offline device's slot doesn't stay locked for the full stale-entry sweep.
+REBIND_GRACE_SECONDS = 20
 
 # Anyone who can reach this server can pick any (room, device_id) pair —
 # there's no signup step, by design (a room code is a shared meeting-place,
@@ -94,6 +123,25 @@ def _cleanup_loop():
             for key in stale_keys:
                 _last_seen.pop(key, None)
                 _inboxes.pop(key, None)
+                _device_secrets.pop(key, None)
+
+
+def _check_and_bind_secret(room: str, device_id: str, secret: str) -> bool:
+    """True if `secret` may act as (room, device_id) right now: either it's
+    already the bound secret, or the slot is unbound/long-idle and this
+    call claims it. See RELAY_SECRET_HEADER's comment above for why."""
+    if not secret:
+        return False
+    key = (room, device_id)
+    now = time.monotonic()
+    with _lock:
+        bound = _device_secrets.get(key)
+        if bound is not None and hmac.compare_digest(bound, secret):
+            return True
+        if bound is None or (now - _last_seen.get(key, 0)) > REBIND_GRACE_SECONDS:
+            _device_secrets[key] = secret
+            return True
+        return False
 
 
 def _inbox(room, device_id):
@@ -165,6 +213,8 @@ def relay_request(room, device_id):
 def relay_poll(room, device_id):
     if not _valid_id(room) or not _valid_id(device_id):
         return jsonify({"error": "room and device_id must be 1-128 chars of letters/digits/._- "}), 400
+    if not _check_and_bind_secret(room, device_id, request.headers.get(RELAY_SECRET_HEADER, "")):
+        return jsonify({"error": "device_id is already claimed by another connection"}), 409
     _touch_presence(room, device_id)
     inbox = _inbox(room, device_id)
     if inbox is None:
@@ -183,6 +233,8 @@ def relay_poll(room, device_id):
 def relay_respond(room, device_id, request_id):
     if not _valid_id(room) or not _valid_id(device_id) or not re.match(r"^[0-9a-f]{32}$", request_id or ""):
         return jsonify({"error": "invalid room, device_id, or request_id"}), 400
+    if not _check_and_bind_secret(room, device_id, request.headers.get(RELAY_SECRET_HEADER, "")):
+        return jsonify({"error": "device_id is already claimed by another connection"}), 409
     _touch_presence(room, device_id)
     payload = request.get_json(silent=True) or {}
     result = {

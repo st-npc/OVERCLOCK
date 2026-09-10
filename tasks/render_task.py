@@ -24,6 +24,22 @@ DEFAULT_WIDTH = 640
 DEFAULT_HEIGHT = 480
 DEFAULT_MAX_ITER = 250
 
+# A /process caller controls width/height/max_iter/x_start/x_end directly
+# (they're read straight out of the request's JSON items — see tasks/__init__.py's
+# contract: a task never gets Flask/validation help beyond what it does itself).
+# Image.new() has no built-in bomb guard the way Image.open() does, so without
+# a cap here a single crafted item (e.g. a 50000x50000 tile) can OOM-kill this
+# process from one unauthenticated /process call. These caps comfortably cover
+# every size this app itself ever generates (DEFAULT_WIDTH/HEIGHT above).
+MAX_TILE_DIMENSION = 4096
+MAX_TILE_PIXELS = 4096 * 4096
+MAX_ITER_CAP = 10_000
+
+
+class InvalidRenderSpec(ValueError):
+    """Raised when a work-item's render spec is outside the sizes this task
+    will ever legitimately produce itself."""
+
 
 def generate_work(n: int, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT, max_iter: int = DEFAULT_MAX_ITER) -> list:
     """Split the viewport into n contiguous vertical strips, one work unit each."""
@@ -66,6 +82,17 @@ def _render_tile(spec: dict) -> Image.Image:
     x_start, x_end = spec["x_start"], spec["x_end"]
     width, height, max_iter = spec["width"], spec["height"], spec["max_iter"]
     tile_w = x_end - x_start
+
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (x_start, x_end, width, height, max_iter)):
+        raise InvalidRenderSpec("x_start/x_end/width/height/max_iter must all be integers")
+    if tile_w <= 0 or height <= 0 or width <= 0:
+        raise InvalidRenderSpec("width/height/tile width must be positive")
+    if width > MAX_TILE_DIMENSION or height > MAX_TILE_DIMENSION or tile_w > MAX_TILE_DIMENSION:
+        raise InvalidRenderSpec(f"width/height/tile width must each be <= {MAX_TILE_DIMENSION}")
+    if tile_w * height > MAX_TILE_PIXELS:
+        raise InvalidRenderSpec(f"tile is too large ({tile_w}x{height} exceeds {MAX_TILE_PIXELS} pixels)")
+    if max_iter <= 0 or max_iter > MAX_ITER_CAP:
+        raise InvalidRenderSpec(f"max_iter must be between 1 and {MAX_ITER_CAP}")
 
     xs = [VIEW_X0 + ((x_start + px) / width) * (VIEW_X1 - VIEW_X0) for px in range(tile_w)]
     ys = [VIEW_Y0 + (py / height) * (VIEW_Y1 - VIEW_Y0) for py in range(height)]

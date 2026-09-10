@@ -11,6 +11,13 @@ from PIL import Image, ImageFilter
 
 DISPLAY_NAME = "Image batch (blur + edge detect)"
 
+# Pillow's own Image.MAX_IMAGE_PIXELS guard bounds any *one* decoded image,
+# but a /process chunk can carry up to 500 items — 500 images each just under
+# that per-image cap still multiplies into gigabytes of live Image data at
+# once. Track a running total across a single process_batch() call so the
+# aggregate is bounded too, independent of how many items are in the chunk.
+MAX_TOTAL_DECODED_PIXELS = 200_000_000  # ~200MP total, e.g. 500 tiny images or a few dozen full-size ones
+
 
 def encode_image(img: Image.Image) -> str:
     buf = io.BytesIO()
@@ -44,8 +51,11 @@ def generate_work(n: int, size: tuple = (640, 480)) -> list:
     return items
 
 
-def _process_one(image_b64: str) -> str:
+def _process_one(image_b64: str, budget: dict) -> str:
     img = decode_image(image_b64)
+    budget["remaining"] -= img.width * img.height
+    if budget["remaining"] < 0:
+        raise ValueError(f"batch's total decoded pixel count exceeds the {MAX_TOTAL_DECODED_PIXELS} limit")
     img = img.convert("RGB")
     img = img.filter(ImageFilter.GaussianBlur(radius=6))
     img = img.filter(ImageFilter.FIND_EDGES)
@@ -55,7 +65,8 @@ def _process_one(image_b64: str) -> str:
 
 def process_batch(items: list) -> dict:
     start = time.monotonic()
-    results = [_process_one(item) for item in items]
+    budget = {"remaining": MAX_TOTAL_DECODED_PIXELS}
+    results = [_process_one(item, budget) for item in items]
     elapsed = time.monotonic() - start
     return {"items": results, "elapsed_seconds": elapsed, "count": len(results)}
 

@@ -327,8 +327,12 @@
   logFilters.addEventListener("click", (e) => {
     const btn = e.target.closest(".log-filter-chip");
     if (!btn) return;
-    logFilters.querySelectorAll(".log-filter-chip").forEach((c) => c.classList.remove("active"));
+    logFilters.querySelectorAll(".log-filter-chip").forEach((c) => {
+      c.classList.remove("active");
+      c.setAttribute("aria-pressed", "false");
+    });
     btn.classList.add("active");
+    btn.setAttribute("aria-pressed", "true");
     const level = btn.dataset.level;
     if (level === "all") {
       delete logBody.dataset.filter;
@@ -472,7 +476,21 @@
       <div class="device-extra"></div>
     `;
     root.querySelector(".device-name-text").textContent = device.name;
-    root.addEventListener("click", () => root.classList.toggle("expanded"));
+    root.tabIndex = 0;
+    root.setAttribute("role", "button");
+    root.setAttribute("aria-expanded", "false");
+    root.setAttribute("aria-label", `${device.name} — activate to show more detail`);
+    const toggleExpanded = () => {
+      const expanded = root.classList.toggle("expanded");
+      root.setAttribute("aria-expanded", String(expanded));
+    };
+    root.addEventListener("click", toggleExpanded);
+    root.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        toggleExpanded();
+      }
+    });
     devicesEl.appendChild(root);
 
     const sparks = {

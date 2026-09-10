@@ -83,6 +83,14 @@ def validate_helper_address(address: str) -> str:
         raise InvalidHelperAddress("could not parse a host from the address")
     if host.lower() in _BLOCKED_HOSTS:
         raise InvalidHelperAddress("that address is not allowed")
+    if parsed.port is None:
+        # Without an explicit port this silently defaults to 80, which is
+        # never where app_helper.py listens — it then just times out with a
+        # confusing "unreachable" error instead of saying what's wrong.
+        raise InvalidHelperAddress(
+            "missing a port — enter it as host:port, e.g. 192.168.1.42:5001 "
+            "(the port app_helper.py is running on for that device)"
+        )
     return addr
 
 
