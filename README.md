@@ -152,16 +152,16 @@ python app_main.py --port 5050
 
 Then enter `127.0.0.1:5001` and `127.0.0.1:5002` as helpers.
 
-### Running the fallback checkpoint tests
+### Running the checkpoint tests
 
 ```bash
-python tests/test_fallback.py
+python tests/test_fallback.py    # zero/unreachable/dying/malformed helper — every image still accounted for
+python tests/test_scheduler.py   # scheduler.py's DLT allocation + EWMA learning correctness
+python tests/test_security.py    # oversized-input, auth, and relay-hijack checks
 ```
 
-Covers: zero helpers, a helper that's never reachable, a helper that dies
-after the initial reachability check but before finishing its chunk, and a
-helper that returns a malformed response. All four must complete with
-every image accounted for.
+No pytest dependency for any of them — plain functions + assertions, same
+philosophy as the rest of this project (see each file's own docstring).
 
 ## Architecture
 
@@ -170,7 +170,9 @@ every image accounted for.
 | `tasks/` | Pluggable demo workloads — see below. No networking/Flask imports in any task module. |
 | `net_client.py` | All outbound HTTP to helpers: timeouts, response validation, typed errors (`HelperUnreachable`, `HelperBadResponse`). |
 | `device_monitor.py` | Local + helper stats polling, rolling ~60s history for sparklines, status state machine (`idle`/`busy`/`unreachable`/`reconnecting`), spare-capacity scoring. |
-| `orchestrator.py` | Job lifecycle: reachability probe → proportional split → concurrent dispatch → per-chunk fallback on failure → ordered merge → `processed_output/`. |
+| `scheduler.py` | Adaptive work-splitting: a Divisible-Load-Theory allocation with EWMA-learned per-device rate/overhead/reliability, plus the two legacy strategies (`proportional_snapshot`, `fixed_equal`) kept for comparison. See "Adaptive scheduling" below and `docs/RESEARCH.md`. |
+| `orchestrator.py` | Job lifecycle: reachability probe → adaptive split (via `scheduler.py`) → concurrent dispatch → per-chunk fallback on failure → ordered merge → `processed_output/`. |
+| `discovery.py` | Stdlib-only UDP broadcast LAN auto-discovery, so helpers don't have to be typed in by hand. See "Auto-discovery" below. |
 | `interfaces.py` | Best-effort local network interface detection (used to surface a USB-C link in the dashboard). |
 | `stress.py` | Demo-only local CPU/RAM load generator (see "Simulate local overload" below). Not used by the sharing pipeline. |
 | `wire.py` | zlib+JSON payload compression shared by every transport, plus a decompression-bomb size guard. |
@@ -209,6 +211,51 @@ listed at `GET /api/tasks`):
 one new file under `tasks/` with those four pieces and adding one line to
 `TASKS` in `tasks/__init__.py` — nothing in `app_main.py`, `app_helper.py`,
 `orchestrator.py`, or the dashboard needs to change.
+
+## Adaptive scheduling
+
+Every job's local/helper split is now computed by `scheduler.py` instead of
+a fixed formula. The default strategy, **`adaptive_dlt`**, is a small,
+literature-grounded scheduling algorithm (Divisible Load Theory — see
+`docs/RESEARCH.md` for the full derivation and references): it picks the
+split that gives every device the same predicted finish time, given each
+device's *learned* throughput (items/sec, from an exponentially-weighted
+moving average of real chunk completions), *learned* dispatch overhead
+(from probe round-trip time), and a reliability score that quietly
+discounts — but never permanently bans — a device that's been failing
+chunks. A brand-new helper with no history yet is bootstrapped from its
+live CPU/RAM spare-capacity score, i.e. the original heuristic
+(`proportional_snapshot`, still selectable) is exactly what `adaptive_dlt`
+reduces to before it has learned anything.
+
+Pick the strategy per job from the dashboard's **Scheduling strategy**
+dropdown, or via `POST /api/start`'s `strategy` field
+(`adaptive_dlt` / `proportional_snapshot` / `fixed_equal`).
+`GET /api/scheduler` exposes the live learned rate/overhead/reliability per
+device, for anyone curious why a split came out the way it did.
+
+**Evaluation**: `bench/simulate.py` (needs
+`pip install -r bench/requirements-bench.txt`, kept out of the core
+dependency list) runs a reproducible Monte Carlo comparison of all three
+strategies across four scenarios (homogeneous, heterogeneous rate,
+heterogeneous overhead, an unreliable helper), writing a CSV and three
+charts to `bench/results/`. Headline result: `adaptive_dlt` matches or
+beats both baselines in every scenario tested, and cuts makespan
+56–61% versus the original heuristic once devices are genuinely
+heterogeneous. Full methodology, numbers, and honest limitations are in
+`docs/RESEARCH.md`.
+
+## Auto-discovery
+
+Typing in every helper's `host:port` by hand doesn't scale past one or two
+devices. Every helper now listens for a small UDP broadcast (`discovery.py`,
+stdlib-only — no new dependency) and replies with its own port and whether
+it requires a passphrase; the dashboard's **🔍 Discover on LAN** button
+sends that broadcast and fills in any helpers that answer within ~1.5s.
+Purely additive — manual `host:port` entry still works exactly as before,
+and a helper can opt out with `--no-discovery`. A discovery reply reveals
+only a port number and a boolean, the same information `/stats` already
+exposes unauthenticated.
 
 ## Real multi-machine testing (Wi-Fi/LAN)
 
@@ -509,10 +556,23 @@ your helper's device-id before you try it from the dashboard.
 
 Everything in this README has been built and tested — including every
 Priority 3 item (task picker, passphrase auth, compression, session
-summary, cross-network relay). The one thing genuinely outside what I can
-verify myself: the relay tunnel is proven correct end-to-end on loopback,
-but real cross-network behavior (actual latency, NAT behavior, a relay
-host you've actually deployed) needs your own testing per the steps
-above. Likewise, real multi-machine Wi-Fi/LAN and any USB-C link still
-need your hardware, as noted in their sections above.
+summary, cross-network relay) and the adaptive scheduler/auto-discovery
+additions above (unit-tested in `tests/test_scheduler.py`, evaluated in
+`bench/simulate.py`, exercised live against a real helper process). The
+things genuinely outside what I can verify myself:
+
+- The relay tunnel is proven correct end-to-end on loopback, but real
+  cross-network behavior (actual latency, NAT behavior, a relay host
+  you've actually deployed) needs your own testing per the steps above.
+- Real multi-machine Wi-Fi/LAN and any USB-C link still need your
+  hardware, as noted in their sections above.
+- `adaptive_dlt`'s benchmark numbers (`docs/RESEARCH.md` §5) come from
+  simulation, not a real multi-machine run — the simulation isolates the
+  scheduling decision cleanly, but the actual seconds-saved on your
+  hardware still needs validating the same way the rest of this section
+  asks you to validate real networking.
+- UDP broadcast discovery depends on your router/OS allowing LAN broadcast
+  traffic — some guest networks with client isolation (already called out
+  above for direct connections) will block it the same way; manual
+  `host:port` entry is the fallback and still works identically.
 # overclock

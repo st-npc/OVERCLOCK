@@ -6,9 +6,11 @@
   const logFilters = document.getElementById("log-filters");
   const startBtn = document.getElementById("start-btn");
   const addHelperBtn = document.getElementById("add-helper");
+  const discoverHelpersBtn = document.getElementById("discover-helpers");
   const helperList = document.getElementById("helper-list");
   const numImagesInput = document.getElementById("num-images");
   const taskTypeSelect = document.getElementById("task-type");
+  const strategySelect = document.getElementById("scheduler-strategy");
   const passphraseInput = document.getElementById("passphrase");
   const runStatusEl = document.getElementById("run-status");
   const runStatusText = document.getElementById("run-status-text");
@@ -77,6 +79,50 @@
       .map((i) => i.value.trim())
       .filter(Boolean);
   }
+
+  discoverHelpersBtn.addEventListener("click", async () => {
+    discoverHelpersBtn.disabled = true;
+    const original = discoverHelpersBtn.textContent;
+    discoverHelpersBtn.textContent = "Searching...";
+    try {
+      const resp = await fetch("/api/discover", { method: "POST" });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        showToast(data.error || "Discovery failed.", "error");
+        return;
+      }
+      const found = data.helpers || [];
+      const existing = new Set(getHelperAddresses());
+      const fresh = found.filter((h) => !existing.has(h.address));
+
+      if (fresh.length === 0) {
+        showToast(found.length === 0 ? "No helpers responded on the LAN." : "All discovered helpers are already listed.", "info");
+        return;
+      }
+
+      // Reuse a single still-empty row before appending new ones.
+      const emptyInputs = Array.from(helperList.querySelectorAll(".helper-input")).filter((i) => !i.value.trim());
+      fresh.forEach((h, idx) => {
+        if (idx < emptyInputs.length) {
+          emptyInputs[idx].value = h.address;
+        } else {
+          addHelperRow(h.address);
+        }
+      });
+
+      const needsPassphrase = fresh.some((h) => h.passphrase_required);
+      showToast(
+        `Found ${fresh.length} helper${fresh.length === 1 ? "" : "s"} on the LAN.` +
+          (needsPassphrase ? " At least one requires a passphrase." : ""),
+        "success"
+      );
+    } catch (err) {
+      showToast(`Could not run discovery: ${err}`, "error");
+    } finally {
+      discoverHelpersBtn.disabled = false;
+      discoverHelpersBtn.textContent = original;
+    }
+  });
 
   const ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
   function escapeAttr(s) {
@@ -201,10 +247,31 @@
     }
   }
 
+  const STRATEGY_LABELS = {
+    adaptive_dlt: "Adaptive (recommended)",
+    proportional_snapshot: "Proportional (legacy)",
+    fixed_equal: "Fixed equal (baseline)",
+  };
+
+  async function loadStrategyChoices() {
+    try {
+      const resp = await fetch("/api/scheduler");
+      const data = await resp.json();
+      const choices = data.strategies || ["adaptive_dlt"];
+      strategySelect.innerHTML = choices
+        .map((id) => `<option value="${id}">${escapeHtml(STRATEGY_LABELS[id] || id)}</option>`)
+        .join("");
+      if (data.default_strategy) strategySelect.value = data.default_strategy;
+    } catch (_err) {
+      strategySelect.innerHTML = '<option value="adaptive_dlt">Adaptive (recommended)</option>';
+    }
+  }
+
   startBtn.addEventListener("click", async () => {
     const helpers = getHelperAddresses();
     const numImages = Math.max(1, Math.min(200, parseInt(numImagesInput.value, 10) || 24));
     const taskType = taskTypeSelect.value || "image";
+    const strategy = strategySelect.value || "adaptive_dlt";
     const passphrase = passphraseInput.value || null;
     savePrefs();
 
@@ -225,7 +292,7 @@
       const resp = await fetch("/api/start", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...adminHeaders() },
-        body: JSON.stringify({ helpers, num_images: numImages, task_type: taskType, passphrase }),
+        body: JSON.stringify({ helpers, num_images: numImages, task_type: taskType, strategy, passphrase }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -266,7 +333,7 @@
     try {
       localStorage.setItem(
         PREFS_KEY,
-        JSON.stringify({ num_images: numImagesInput.value, task_type: taskTypeSelect.value })
+        JSON.stringify({ num_images: numImagesInput.value, task_type: taskTypeSelect.value, strategy: strategySelect.value })
       );
     } catch (_err) {
       // best-effort only
@@ -793,6 +860,8 @@
     loadInterfaces();
     await loadTaskChoices();
     if (prefs && prefs.task_type) taskTypeSelect.value = prefs.task_type;
+    await loadStrategyChoices();
+    if (prefs && prefs.strategy) strategySelect.value = prefs.strategy;
     loadStressStatus();
     setInterval(loadStressStatus, 4000);
   }

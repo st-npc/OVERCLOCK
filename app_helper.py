@@ -39,6 +39,7 @@ import psutil
 import requests
 from flask import Flask, Response, jsonify, render_template, request
 
+import discovery
 import wire
 from flask_common import install_error_handlers, install_security_headers
 from security import RateLimiter, constant_time_eq, rate_limited
@@ -352,6 +353,12 @@ if __name__ == "__main__":
     parser.add_argument("--relay", default=None, help="relay_server.py base URL, e.g. http://relay.example.com:5090")
     parser.add_argument("--room", default="default", help="relay room code shared with the main device")
     parser.add_argument("--device-id", default=None, help="this device's id within the relay room (default: derived from port)")
+    parser.add_argument(
+        "--no-discovery", action="store_true",
+        help="disable replying to LAN auto-discovery broadcasts (see discovery.py). On by default — a "
+        "discovery reply only ever reveals this helper's port and whether a passphrase is required, the "
+        "same information /stats already exposes unauthenticated.",
+    )
     args = parser.parse_args()
 
     if args.passphrase:
@@ -360,6 +367,10 @@ if __name__ == "__main__":
         print("Passphrase required on /process")
     else:
         print("No passphrase set — any device that can reach /process can send this helper work.")
+
+    if not args.no_discovery:
+        responder = discovery.DiscoveryResponder(helper_port=args.port, passphrase_required=bool(_passphrase))
+        responder.start()
 
     if args.relay:
         device_id = args.device_id or f"helper-{args.port}"

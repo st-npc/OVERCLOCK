@@ -12,7 +12,9 @@ import time
 
 from flask import Flask, Response, jsonify, render_template, request
 
+import discovery
 import net_client
+import scheduler
 from device_monitor import DeviceMonitor
 from flask_common import install_error_handlers, install_security_headers
 from interfaces import list_network_interfaces
@@ -50,6 +52,9 @@ load_generator = LoadGenerator()
 _start_limiter = RateLimiter(max_requests=10, window_seconds=10)
 _load_limiter = RateLimiter(max_requests=20, window_seconds=10)
 _read_limiter = RateLimiter(max_requests=120, window_seconds=10)
+# Each call blocks ~1.5s broadcasting on the LAN — a generous quota still
+# comfortably prevents someone from turning this into a broadcast-storm knob.
+_discover_limiter = RateLimiter(max_requests=6, window_seconds=10)
 
 DASHBOARD_CSP = (
     "default-src 'self'; "
@@ -143,10 +148,38 @@ def api_interfaces():
     return jsonify({"interfaces": list_network_interfaces()})
 
 
+@app.post("/api/discover")
+@rate_limited(_discover_limiter)
+def api_discover():
+    """Broadcast a LAN discovery request and return whatever helpers
+    answered in time. Read-only from this device's point of view (it
+    doesn't register the found helpers or start anything) — the dashboard
+    decides what to do with the results."""
+    found = discovery.discover_helpers()
+    return jsonify({"helpers": found})
+
+
 @app.get("/api/tasks")
 @rate_limited(_read_limiter)
 def api_tasks():
     return jsonify({"tasks": task_choices(), "default": DEFAULT_TASK})
+
+
+@app.get("/api/scheduler")
+@rate_limited(_read_limiter)
+def api_scheduler():
+    """Observability into the adaptive scheduler's learned state: EWMA
+    throughput/overhead/reliability per device, plus which strategies are
+    selectable. Read-only — exists so the dashboard (or bench/simulate.py,
+    or a curious operator) can see *why* a split came out the way it did,
+    instead of the scheduler being a black box."""
+    return jsonify(
+        {
+            "strategies": list(scheduler.STRATEGIES),
+            "default_strategy": scheduler.DEFAULT_STRATEGY,
+            "learned": orchestrator.scheduler.snapshot(),
+        }
+    )
 
 
 @app.get("/api/load")
@@ -230,15 +263,21 @@ def api_start():
             return jsonify({"error": "'passphrase' is too long"}), 400
     monitor.set_passphrase(passphrase)
 
+    strategy = payload.get("strategy", scheduler.DEFAULT_STRATEGY)
+    if not isinstance(strategy, str) or strategy not in scheduler.STRATEGIES:
+        return jsonify({"error": f"'strategy' must be one of {list(scheduler.STRATEGIES)}"}), 400
+
     for addr in helpers:
         monitor.add_helper(addr)
 
     try:
-        orchestrator.start_job_async(helpers, num_images, task_type)
+        orchestrator.start_job_async(helpers, num_images, task_type, strategy)
     except JobAlreadyRunningError:
         return jsonify({"error": "a job is already running"}), 409
 
-    return jsonify({"ok": True, "helpers": helpers, "num_images": num_images, "task_type": task_type})
+    return jsonify(
+        {"ok": True, "helpers": helpers, "num_images": num_images, "task_type": task_type, "strategy": strategy}
+    )
 
 
 STATS_PUSH_INTERVAL_IDLE = 1.0

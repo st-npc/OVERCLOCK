@@ -13,12 +13,15 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import net_client
+import scheduler
 from device_monitor import DeviceMonitor
 from tasks import DEFAULT_TASK, get_task
 
 OUTPUT_DIR = "processed_output"
-MIN_LOCAL_SHARE = 0.2   # local always keeps at least this fraction, even fully loaded
-MAX_LOCAL_SHARE = 1.0
+# Re-exported for backward compatibility — the actual constants now live in
+# scheduler.py, which both this module and bench/simulate.py import.
+MIN_LOCAL_SHARE = scheduler.MIN_LOCAL_SHARE
+MAX_LOCAL_SHARE = scheduler.MAX_LOCAL_SHARE
 
 
 class JobAlreadyRunningError(Exception):
@@ -29,6 +32,7 @@ class Orchestrator:
     def __init__(self, monitor: DeviceMonitor, event_queue):
         self.monitor = monitor
         self.events = event_queue
+        self.scheduler = scheduler.SchedulerState()
         self._job_lock = threading.Lock()
         self._job_running = False
         self.current_job_id = None
@@ -43,22 +47,23 @@ class Orchestrator:
         with self._job_lock:
             return self._job_running
 
-    def start_job_async(self, helper_addresses: list, num_images: int = 24, task_type: str = DEFAULT_TASK):
+    def start_job_async(self, helper_addresses: list, num_images: int = 24, task_type: str = DEFAULT_TASK,
+                         strategy: str = scheduler.DEFAULT_STRATEGY):
         with self._job_lock:
             if self._job_running:
                 raise JobAlreadyRunningError("A job is already running")
             self._job_running = True
         thread = threading.Thread(
-            target=self._run_job_safely, args=(helper_addresses, num_images, task_type), daemon=True
+            target=self._run_job_safely, args=(helper_addresses, num_images, task_type, strategy), daemon=True
         )
         thread.start()
 
-    def _run_job_safely(self, helper_addresses, num_images, task_type):
+    def _run_job_safely(self, helper_addresses, num_images, task_type, strategy=scheduler.DEFAULT_STRATEGY):
         job_id = uuid.uuid4().hex[:8]
         self.current_job_id = job_id
         self.monitor.begin_job()  # fast polling for the whole job, not just dispatch
         try:
-            self._run_job(job_id, helper_addresses, num_images, task_type)
+            self._run_job(job_id, helper_addresses, num_images, task_type, strategy)
         except Exception as exc:  # a bug here must never leave the UI stuck
             self.log(f"Job {job_id} failed unexpectedly: {exc}", level="error")
             self._emit("done", job_id=job_id, ok=False, error=str(exc))
@@ -69,12 +74,15 @@ class Orchestrator:
             self.monitor.end_job()
 
     # -- core job logic --------------------------------------------------
-    def _run_job(self, job_id: str, helper_addresses: list, num_images: int, task_type: str = DEFAULT_TASK):
+    def _run_job(self, job_id: str, helper_addresses: list, num_images: int, task_type: str = DEFAULT_TASK,
+                 strategy: str = scheduler.DEFAULT_STRATEGY):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         task_mod = get_task(task_type)
+        if strategy not in scheduler.STRATEGIES:
+            strategy = scheduler.DEFAULT_STRATEGY
         self._emit(
             "job_start", job_id=job_id, num_images=num_images, helpers=helper_addresses,
-            task_type=task_type, task_name=task_mod.DISPLAY_NAME,
+            task_type=task_type, task_name=task_mod.DISPLAY_NAME, strategy=strategy,
         )
         self.log(f"Job {job_id}: generating {num_images} work item(s) for '{task_mod.DISPLAY_NAME}'")
         items = task_mod.generate_work(num_images)
@@ -96,13 +104,13 @@ class Orchestrator:
         elif not helper_addresses:
             self.log(f"Job {job_id}: no helpers configured — running fully local", level="info")
 
-        shares = self._compute_shares(reachable)
+        shares = self._compute_shares(reachable, strategy)
         counts = self._split_counts(num_images, shares)
         assignments = self._build_assignments(counts)
 
         share_desc = ", ".join(f"{name}={c}" for name, c in counts.items() if c > 0)
-        self.log(f"Job {job_id}: split -> {share_desc}")
-        self._emit("split", job_id=job_id, counts={k: v for k, v in counts.items() if v > 0})
+        self.log(f"Job {job_id}: split -> {share_desc} (strategy={strategy})")
+        self._emit("split", job_id=job_id, counts={k: v for k, v in counts.items() if v > 0}, strategy=strategy)
 
         # Track real before/peak CPU & RAM for every device about to do work,
         # so the UI can show exactly how much load shifted — not just how
@@ -137,6 +145,7 @@ class Orchestrator:
                     results[idx] = item
                 device_counts[target] = device_counts.get(target, 0) + len(indices)
                 device_elapsed[target] = device_elapsed.get(target, 0.0) + elapsed
+                self.scheduler.record_chunk_result(target, success=True, count=len(indices), elapsed=elapsed)
                 if compression:
                     compression_ratios.append(compression["response_ratio"])
                 comp_note = f", compressed to {compression['response_ratio']*100:.0f}% of original" if compression else ""
@@ -147,6 +156,7 @@ class Orchestrator:
                     "chunk_done", job_id=job_id, target=target, count=len(indices), elapsed=elapsed, compression=compression
                 )
             except net_client.HelperError as exc:
+                self.scheduler.record_chunk_result(target, success=False)
                 self.log(
                     f"Job {job_id}: helper {target} dropped mid-job ({exc}) — "
                     f"reassigning its {len(indices)} item(s) to local",
@@ -163,6 +173,7 @@ class Orchestrator:
                     results[idx] = item
                 device_counts[target] = device_counts.get(target, 0) + len(indices)
                 device_elapsed[target] = device_elapsed.get(target, 0.0) + elapsed
+                self.scheduler.record_chunk_result(target, success=True, count=len(indices), elapsed=elapsed)
                 self.log(f"Job {job_id}: local fallback finished {len(indices)} item(s) in {elapsed:.2f}s")
                 self._emit(
                     "chunk_done", job_id=job_id, target=target, count=len(indices), elapsed=elapsed, fallback=True
@@ -237,8 +248,10 @@ class Orchestrator:
         for addr in helper_addresses:
             self.monitor.add_helper(addr)
             rec = self.monitor.get(addr)
+            probe_start = time.monotonic()
             try:
                 data = net_client.fetch_stats(addr, passphrase=self.monitor.passphrase)
+                self.scheduler.record_probe_latency(addr, time.monotonic() - probe_start)
                 rec.record_success(
                     cpu_percent=data["cpu_percent"],
                     ram_percent=data["ram_percent"],
@@ -261,23 +274,9 @@ class Orchestrator:
                 self.log(f"Helper {addr} unreachable at job start ({exc})", level="warn")
         return reachable, summary
 
-    def _compute_shares(self, reachable_helpers: list) -> dict:
+    def _compute_shares(self, reachable_helpers: list, strategy: str = scheduler.DEFAULT_STRATEGY) -> dict:
         local_snap = self.monitor.local.snapshot()
-        overload = max(local_snap["cpu_percent"], local_snap["ram_percent"]) / 100.0
-        local_share = min(MAX_LOCAL_SHARE, max(MIN_LOCAL_SHARE, 1.0 - overload))
-
-        if not reachable_helpers:
-            return {"local": 1.0}
-
-        total_score = sum(score for _, score in reachable_helpers)
-        if total_score <= 0:
-            return {"local": 1.0}
-
-        offload = 1.0 - local_share
-        shares = {"local": local_share}
-        for addr, score in reachable_helpers:
-            shares[addr] = offload * (score / total_score)
-        return shares
+        return self.scheduler.compute_shares(strategy, local_snap, reachable_helpers)
 
     @staticmethod
     def _split_counts(n: int, shares: dict) -> dict:
